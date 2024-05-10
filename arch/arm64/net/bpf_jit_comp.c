@@ -359,7 +359,10 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf,
 		/* Save callee-saved registers */
 		emit(A64_PUSH(r6, r7, A64_SP), ctx);
 		emit(A64_PUSH(r8, r9, A64_SP), ctx);
-		emit(A64_PUSH(fp, tcc, A64_SP), ctx);
+		if (is_main_prog)
+			emit(A64_PUSH(fp, tcc, A64_SP), ctx);
+		else
+			emit(A64_PUSH(fp, A64_R(24), A64_SP), ctx);
 		emit(A64_PUSH(fpb, A64_R(28), A64_SP), ctx);
 	} else {
 		/*
@@ -713,7 +716,8 @@ static void build_plt(struct jit_ctx *ctx)
 		plt->target = (u64)&dummy_tramp;
 }
 
-static void build_epilogue(struct jit_ctx *ctx, bool is_exception_cb)
+static void build_epilogue(struct jit_ctx *ctx, bool is_exception_cb,
+			   bool is_main_prog)
 {
 	const u8 r0 = bpf2a64[BPF_REG_0];
 	const u8 r6 = bpf2a64[BPF_REG_6];
@@ -722,6 +726,7 @@ static void build_epilogue(struct jit_ctx *ctx, bool is_exception_cb)
 	const u8 r9 = bpf2a64[BPF_REG_9];
 	const u8 fp = bpf2a64[BPF_REG_FP];
 	const u8 fpb = bpf2a64[FP_BOTTOM];
+	const u8 tcc = bpf2a64[TCALL_CNT];
 
 	/* We're done with BPF stack */
 	emit(A64_ADD_I(1, A64_SP, A64_SP, ctx->stack_size), ctx);
@@ -737,8 +742,11 @@ static void build_epilogue(struct jit_ctx *ctx, bool is_exception_cb)
 
 	/* Restore x27 and x28 */
 	emit(A64_POP(fpb, A64_R(28), A64_SP), ctx);
-	/* Restore fs (x25) and x26 */
-	emit(A64_POP(fp, A64_R(26), A64_SP), ctx);
+	/* Restore fs (x25) and (x26 or x24) */
+	if (is_main_prog)
+		emit(A64_POP(fp, tcc, A64_SP), ctx);
+	else
+		emit(A64_POP(fp, A64_R(24), A64_SP), ctx);
 
 	/* Restore callee-saved register */
 	emit(A64_POP(r8, r9, A64_SP), ctx);
@@ -1667,6 +1675,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 	struct bpf_binary_header *ro_header;
 	struct arm64_jit_data *jit_data;
 	bool was_classic = bpf_prog_was_classic(prog);
+	bool is_main_prog = !bpf_is_subprog(prog);
 	bool tmp_blinded = false;
 	bool extra_pass = false;
 	struct jit_ctx ctx;
@@ -1739,7 +1748,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 	}
 
 	ctx.epilogue_offset = ctx.idx;
-	build_epilogue(&ctx, prog->aux->exception_cb);
+	build_epilogue(&ctx, prog->aux->exception_cb, is_main_prog);
 	build_plt(&ctx);
 
 	extable_align = __alignof__(struct exception_table_entry);
@@ -1783,7 +1792,7 @@ skip_init_ctx:
 		goto out_free_hdr;
 	}
 
-	build_epilogue(&ctx, prog->aux->exception_cb);
+	build_epilogue(&ctx, prog->aux->exception_cb, is_main_prog);
 	build_plt(&ctx);
 
 	/* 3. Extra pass to validate JITed code. */
