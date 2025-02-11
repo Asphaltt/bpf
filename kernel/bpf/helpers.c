@@ -3714,6 +3714,27 @@ __bpf_kfunc int bpf_strstr(const char *s1__ign, const char *s2__ign)
 	return bpf_strnstr(s1__ign, s2__ign, XATTR_SIZE_MAX);
 }
 
+__bpf_kfunc int bpf_read_branch_snapshot(void *ctx, void *buf, u32 size)
+{
+	static const u32 br_entry_size = sizeof(struct perf_branch_entry);
+	struct bpf_tramp_branch_entries __percpu *br;
+	struct bpf_tramp_run_ctx *run_ctx;
+	u32 offset = ((u32 *)ctx)[-1];
+
+	if (unlikely(!size || size % br_entry_size))
+		return -EINVAL;
+
+	run_ctx = ctx - offset;
+	br = this_cpu_ptr(run_ctx->br);
+
+	if (br->cnt > 0) {
+		size = min(size, br->cnt * br_entry_size);
+		memcpy(buf, (void *) br->entries, size);
+		return size;
+	}
+	return -ENOENT;
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(generic_btf_ids)
@@ -3754,6 +3775,7 @@ BTF_ID_FLAGS(func, bpf_throw)
 #ifdef CONFIG_BPF_EVENTS
 BTF_ID_FLAGS(func, bpf_send_signal_task, KF_TRUSTED_ARGS)
 #endif
+BTF_ID_FLAGS(func, bpf_read_branch_snapshot)
 BTF_KFUNCS_END(generic_btf_ids)
 
 static const struct btf_kfunc_id_set generic_kfunc_set = {

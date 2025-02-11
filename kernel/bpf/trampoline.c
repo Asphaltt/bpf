@@ -261,6 +261,8 @@ static void bpf_tramp_image_free(struct bpf_tramp_image *im)
 	arch_free_bpf_trampoline(im->image, im->size);
 	bpf_jit_uncharge_modmem(im->size);
 	percpu_ref_exit(&im->pcref);
+	if (im->br)
+		free_percpu(im->br);
 	kfree_rcu(im, rcu);
 }
 
@@ -353,7 +355,8 @@ static void bpf_tramp_image_put(struct bpf_tramp_image *im)
 	call_rcu_tasks_trace(&im->rcu, __bpf_tramp_image_put_rcu_tasks);
 }
 
-static struct bpf_tramp_image *bpf_tramp_image_alloc(u64 key, int size)
+static struct bpf_tramp_image *bpf_tramp_image_alloc(u64 key, int size,
+						     bool with_branch_entries)
 {
 	struct bpf_tramp_image *im;
 	struct bpf_ksym *ksym;
@@ -378,6 +381,14 @@ static struct bpf_tramp_image *bpf_tramp_image_alloc(u64 key, int size)
 	if (err)
 		goto out_free_image;
 
+	if (with_branch_entries) {
+		im->br = alloc_percpu_gfp(struct bpf_tramp_branch_entries, GFP_KERNEL);
+		if (!im->br) {
+			err = -ENOMEM;
+			goto out_free_image;
+		}
+	}
+
 	ksym = &im->ksym;
 	INIT_LIST_HEAD_RCU(&ksym->lnode);
 	snprintf(ksym->name, KSYM_NAME_LEN, "bpf_trampoline_%llu", key);
@@ -397,6 +408,7 @@ out:
 
 static int bpf_trampoline_update(struct bpf_trampoline *tr, bool lock_direct_mutex)
 {
+	const u32 branch_flags = BPF_TRAMP_F_BRANCH_ENTRY | BPF_TRAMP_F_BRANCH_EXIT;
 	struct bpf_tramp_image *im;
 	struct bpf_tramp_links *tlinks;
 	u32 orig_flags = tr->flags;
@@ -414,8 +426,8 @@ static int bpf_trampoline_update(struct bpf_trampoline *tr, bool lock_direct_mut
 		goto out;
 	}
 
-	/* clear all bits except SHARE_IPMODIFY and TAIL_CALL_CTX */
-	tr->flags &= (BPF_TRAMP_F_SHARE_IPMODIFY | BPF_TRAMP_F_TAIL_CALL_CTX);
+	/* clear all bits except SHARE_IPMODIFY, TAIL_CALL_CTX, BRANCH_ENTRY and BRANCH_EXIT. */
+	tr->flags &= (BPF_TRAMP_F_SHARE_IPMODIFY | BPF_TRAMP_F_TAIL_CALL_CTX | branch_flags);
 
 	if (tlinks[BPF_TRAMP_FEXIT].nr_links ||
 	    tlinks[BPF_TRAMP_MODIFY_RETURN].nr_links) {
@@ -449,7 +461,7 @@ again:
 		goto out;
 	}
 
-	im = bpf_tramp_image_alloc(tr->key, size);
+	im = bpf_tramp_image_alloc(tr->key, size, tr->flags & branch_flags);
 	if (IS_ERR(im)) {
 		err = PTR_ERR(im);
 		goto out;

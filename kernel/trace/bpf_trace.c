@@ -1232,7 +1232,7 @@ static const struct bpf_func_proto bpf_get_func_ret_proto = {
 BPF_CALL_1(get_func_arg_cnt, void *, ctx)
 {
 	/* This helper call is inlined by verifier. */
-	return ((u64 *)ctx)[-1];
+	return ((u32 *)ctx)[-2];
 }
 
 static const struct bpf_func_proto bpf_get_func_arg_cnt_proto = {

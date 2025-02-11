@@ -6,6 +6,7 @@
 
 #include <uapi/linux/bpf.h>
 #include <uapi/linux/filter.h>
+#include <uapi/linux/perf_event.h>
 
 #include <linux/workqueue.h>
 #include <linux/file.h>
@@ -1173,6 +1174,11 @@ struct btf_func_model {
  */
 #define BPF_TRAMP_F_INDIRECT		BIT(8)
 
+/* Indicate the trampoline should capture branch snapshot for fentry progs. */
+#define BPF_TRAMP_F_BRANCH_ENTRY	BIT(9)
+/* Indicate the trampoline should capture branch snapshot for fexit progs. */
+#define BPF_TRAMP_F_BRANCH_EXIT		BIT(10)
+
 /* Each call __bpf_prog_enter + call bpf_func + call __bpf_prog_exit is ~50
  * bytes on x86.
  */
@@ -1252,11 +1258,20 @@ enum bpf_tramp_prog_type {
 	BPF_TRAMP_REPLACE, /* more than MAX */
 };
 
+/* Same as MAX_LBR_ENTRIES of arch/x86/events/perf_event.h */
+#define MAX_BRANCH_ENTRIES		32
+
+struct bpf_tramp_branch_entries {
+	u32 cnt;
+	struct perf_branch_entry entries[MAX_BRANCH_ENTRIES];
+};
+
 struct bpf_tramp_image {
 	void *image;
 	int size;
 	struct bpf_ksym ksym;
 	struct percpu_ref pcref;
+	struct bpf_tramp_branch_entries __percpu *br;
 	void *ip_after_call;
 	void *ip_epilogue;
 	union {
@@ -2246,6 +2261,7 @@ struct bpf_tramp_run_ctx {
 	struct bpf_run_ctx run_ctx;
 	u64 bpf_cookie;
 	struct bpf_run_ctx *saved_run_ctx;
+	struct bpf_tramp_branch_entries __percpu *br;
 };
 
 static inline struct bpf_run_ctx *bpf_set_run_ctx(struct bpf_run_ctx *new_ctx)

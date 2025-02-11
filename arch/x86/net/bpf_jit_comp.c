@@ -11,6 +11,7 @@
 #include <linux/bpf.h>
 #include <linux/memory.h>
 #include <linux/sort.h>
+#include <linux/perf_event.h>
 #include <asm/extable.h>
 #include <asm/ftrace.h>
 #include <asm/set_memory.h>
@@ -18,6 +19,7 @@
 #include <asm/text-patching.h>
 #include <asm/unwind.h>
 #include <asm/cfi.h>
+#include "../events/perf_event.h"
 
 static bool all_callee_regs_used[4] = {true, true, true, true};
 
@@ -2999,6 +3001,40 @@ static int invoke_bpf_mod_ret(const struct btf_func_model *m, u8 **pprog,
 	return 0;
 }
 
+static int invoke_branch_snapshot(u8 **pprog, struct bpf_tramp_image *im,
+				  void *image, void *rw_image)
+{
+	u8 *prog = *pprog;
+
+	/* Emit:
+	 *
+	 * struct bpf_tramp_branch_entries __percpu *br = this_cpu_ptr(ctx->br);
+	 * br->cnt = static_call(perf_snapshot_branch_stack)(br->entries, x86_pmu.lbr_nr);
+	 */
+
+	/* mov rbx, im->br */
+	emit_mov_imm64(&prog, BPF_REG_6, (long) im->br >> 32, (u32)(long) im->br);
+#ifdef CONFIG_SMP
+	/* add rbx, gs:[<off>] */
+	EMIT2(0x65, 0x48);
+	EMIT3(0x03, 0x1C, 0x25);
+	EMIT((u32)(unsigned long)&this_cpu_off, 4);
+#endif
+	/* mov esi, x86_pmu.lbr_nr */
+	EMIT1_off32(0xBE, x86_pmu.lbr_nr);
+	/* lea rdi, [rbx + offsetof(struct bpf_tramp_branch_entries, entries)] */
+	EMIT4(0x48, 0x8D, 0x7B, offsetof(struct bpf_tramp_branch_entries, entries));
+	/* call static_call_query(perf_snapshot_branch_stack) */
+	if (emit_rsb_call(&prog, static_call_query(perf_snapshot_branch_stack),
+			  image + (prog - (u8 *)rw_image)))
+		return -EINVAL;
+	/* mov dword ptr [rbx], eax */
+	EMIT2(0x89, 0x03);
+
+	*pprog = prog;
+	return 0;
+}
+
 /* mov rax, qword ptr [rbp - rounded_stack_depth - 8] */
 #define LOAD_TRAMP_TAIL_CALL_CNT_PTR(stack)	\
 	__LOAD_TCC_PTR(-round_up(stack, 8) - 8)
@@ -3205,8 +3241,10 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 	/* Store number of argument registers of the traced function:
 	 *   mov rax, nr_regs
 	 *   mov QWORD PTR [rbp - nregs_off], rax
+	 *
+	 * Store offset between run_ctx and prog's ctx at the same time.
 	 */
-	emit_mov_imm64(&prog, BPF_REG_0, 0, (u32) nr_regs);
+	emit_mov_imm64(&prog, BPF_REG_0, (u32) (run_ctx_off - regs_off), (u32) nr_regs);
 	emit_stx(&prog, BPF_DW, BPF_REG_FP, BPF_REG_0, -nregs_off);
 
 	if (flags & BPF_TRAMP_F_IP_ARG) {
@@ -3219,6 +3257,23 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 	}
 
 	save_args(m, &prog, regs_off, false);
+
+	if (flags & (BPF_TRAMP_F_BRANCH_ENTRY | BPF_TRAMP_F_BRANCH_EXIT)) {
+		/* In order to access branch snapshot via
+		 * bpf_read_branch_snapshot() later, emit:
+		 * ctx->br = im->br;
+		 */
+
+		/* mov rax, im->br */
+		emit_mov_imm64(&prog, BPF_REG_0, (long) im->br >> 32, (u32)(long) im->br);
+		/* mov qword ptr [rbp - run_ctx_off + offsetof(ctx, br)], rax */
+		emit_stx(&prog, BPF_DW, BPF_REG_FP, BPF_REG_0,
+			 -run_ctx_off+offsetof(struct bpf_tramp_run_ctx, br));
+	}
+
+	if (fentry->nr_links && (flags & BPF_TRAMP_F_BRANCH_ENTRY))
+		/* Get branch snapshot asap. */
+		invoke_branch_snapshot(&prog, im, image, rw_image);
 
 	if (flags & BPF_TRAMP_F_CALL_ORIG) {
 		/* arg1: mov rdi, im */
@@ -3275,6 +3330,10 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		im->ip_after_call = image + (prog - (u8 *)rw_image);
 		emit_nops(&prog, X86_PATCH_SIZE);
 	}
+
+	if (fexit->nr_links && (flags & BPF_TRAMP_F_BRANCH_EXIT))
+		/* Get branch snapshot after calling original function immediately. */
+		invoke_branch_snapshot(&prog, im, image, rw_image);
 
 	if (fmod_ret->nr_links) {
 		/* From Intel 64 and IA-32 Architectures Optimization

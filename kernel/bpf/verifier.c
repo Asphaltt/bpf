@@ -12259,6 +12259,7 @@ enum special_kfunc_type {
 	KF_bpf_res_spin_lock_irqsave,
 	KF_bpf_res_spin_unlock_irqrestore,
 	KF___bpf_trap,
+	KF_bpf_read_branch_snapshot,
 };
 
 BTF_ID_LIST(special_kfunc_list)
@@ -12327,6 +12328,7 @@ BTF_ID(func, bpf_res_spin_unlock)
 BTF_ID(func, bpf_res_spin_lock_irqsave)
 BTF_ID(func, bpf_res_spin_unlock_irqrestore)
 BTF_ID(func, __bpf_trap)
+BTF_ID(func, bpf_read_branch_snapshot)
 
 static bool is_kfunc_ret_null(struct bpf_kfunc_call_arg_meta *meta)
 {
@@ -13961,6 +13963,20 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			if (err < 0)
 				return err;
 		}
+	}
+
+	if (meta.func_id == special_kfunc_list[KF_bpf_read_branch_snapshot]) {
+		if (env->prog->type != BPF_PROG_TYPE_TRACING ||
+		    (env->prog->expected_attach_type != BPF_TRACE_FENTRY &&
+		     env->prog->expected_attach_type != BPF_TRACE_FEXIT)) {
+			verbose(env, "only fentry and fexit programs support bpf_read_branch_snapshot kfunc.\n");
+			return -EINVAL;
+		}
+
+		if (env->prog->expected_attach_type == BPF_TRACE_FENTRY)
+			env->prog->aux->dst_trampoline->flags |= BPF_TRAMP_F_BRANCH_ENTRY;
+		else if (env->prog->expected_attach_type == BPF_TRACE_FEXIT)
+			env->prog->aux->dst_trampoline->flags |= BPF_TRAMP_F_BRANCH_EXIT;
 	}
 
 	for (i = 0; i < CALLER_SAVED_REGS; i++)
@@ -22719,7 +22735,7 @@ patch_map_ops_generic:
 			if (eatype == BPF_TRACE_FEXIT ||
 			    eatype == BPF_MODIFY_RETURN) {
 				/* Load nr_args from ctx - 8 */
-				insn_buf[0] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, -8);
+				insn_buf[0] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, -8);
 				insn_buf[1] = BPF_ALU64_IMM(BPF_LSH, BPF_REG_0, 3);
 				insn_buf[2] = BPF_ALU64_REG(BPF_ADD, BPF_REG_0, BPF_REG_1);
 				insn_buf[3] = BPF_LDX_MEM(BPF_DW, BPF_REG_3, BPF_REG_0, 0);
@@ -22745,7 +22761,7 @@ patch_map_ops_generic:
 		if (prog_type == BPF_PROG_TYPE_TRACING &&
 		    insn->imm == BPF_FUNC_get_func_arg_cnt) {
 			/* Load nr_args from ctx - 8 */
-			insn_buf[0] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, -8);
+			insn_buf[0] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, -8);
 
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, 1);
 			if (!new_prog)
