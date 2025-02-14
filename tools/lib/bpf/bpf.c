@@ -741,7 +741,9 @@ int bpf_link_create(int prog_fd, int target_fd,
 	if (iter_info_len || target_btf_id) {
 		if (iter_info_len && target_btf_id)
 			return libbpf_err(-EINVAL);
-		if (!OPTS_ZEROED(opts, target_btf_id))
+		if (target_btf_id && !OPTS_ZEROED(opts, tracing.log_size))
+			return libbpf_err(-EINVAL);
+		else if (!OPTS_ZEROED(opts, target_btf_id))
 			return libbpf_err(-EINVAL);
 	}
 
@@ -753,6 +755,8 @@ int bpf_link_create(int prog_fd, int target_fd,
 
 	if (target_btf_id) {
 		attr.link_create.target_btf_id = target_btf_id;
+		attr.link_create.tracing.log_buf = ptr_to_u64(OPTS_GET(opts, tracing.log_buf, 0));
+		attr.link_create.tracing.log_size = OPTS_GET(opts, tracing.log_size, 0);
 		goto proceed;
 	}
 
@@ -794,6 +798,8 @@ int bpf_link_create(int prog_fd, int target_fd,
 	case BPF_MODIFY_RETURN:
 	case BPF_LSM_MAC:
 		attr.link_create.tracing.cookie = OPTS_GET(opts, tracing.cookie, 0);
+		attr.link_create.tracing.log_buf = 0;
+		attr.link_create.tracing.log_size = 0;
 		if (!OPTS_ZEROED(opts, tracing))
 			return libbpf_err(-EINVAL);
 		break;
