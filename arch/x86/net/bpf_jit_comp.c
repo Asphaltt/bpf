@@ -3146,6 +3146,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 {
 	int i, ret, nr_regs = m->nr_args, stack_size = 0;
 	int regs_off, nregs_off, ip_off, run_ctx_off, arg_stack_off, rbx_off;
+	struct bpf_tramp_links *faround = &tlinks[BPF_TRAMP_FAROUND];
 	struct bpf_tramp_links *fentry = &tlinks[BPF_TRAMP_FENTRY];
 	struct bpf_tramp_links *fexit = &tlinks[BPF_TRAMP_FEXIT];
 	struct bpf_tramp_links *fmod_ret = &tlinks[BPF_TRAMP_MODIFY_RETURN];
@@ -3311,6 +3312,12 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 			return -EINVAL;
 	}
 
+	if (faround->nr_links) {
+		if (invoke_bpf(m, &prog, faround, regs_off, run_ctx_off,
+			       flags & BPF_TRAMP_F_RET_FENTRY_RET, image, rw_image))
+			return -EINVAL;
+	}
+
 	if (fmod_ret->nr_links) {
 		branches = kcalloc(fmod_ret->nr_links, sizeof(u8 *),
 				   GFP_KERNEL);
@@ -3369,6 +3376,14 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 
 	if (fexit->nr_links) {
 		if (invoke_bpf(m, &prog, fexit, regs_off, run_ctx_off,
+			       false, image, rw_image)) {
+			ret = -EINVAL;
+			goto cleanup;
+		}
+	}
+
+	if (faround->nr_links) {
+		if (invoke_bpf(m, &prog, faround, regs_off, run_ctx_off,
 			       false, image, rw_image)) {
 			ret = -EINVAL;
 			goto cleanup;
