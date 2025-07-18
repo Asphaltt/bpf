@@ -12168,6 +12168,7 @@ enum special_kfunc_type {
 	KF_bpf_res_spin_unlock,
 	KF_bpf_res_spin_lock_irqsave,
 	KF_bpf_res_spin_unlock_irqrestore,
+	KF_bpf_tracing_is_exit,
 	KF___bpf_trap,
 };
 
@@ -12236,6 +12237,7 @@ BTF_ID(func, bpf_res_spin_lock)
 BTF_ID(func, bpf_res_spin_unlock)
 BTF_ID(func, bpf_res_spin_lock_irqsave)
 BTF_ID(func, bpf_res_spin_unlock_irqrestore)
+BTF_ID(func, bpf_tracing_is_exit)
 BTF_ID(func, __bpf_trap)
 
 static bool is_kfunc_ret_null(struct bpf_kfunc_call_arg_meta *meta)
@@ -13876,6 +13878,15 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			if (err < 0)
 				return err;
 		}
+	}
+
+	if (meta.func_id == special_kfunc_list[KF_bpf_tracing_is_exit]) {
+		if (env->prog->expected_attach_type == BPF_TRACE_FAROUND ||
+		    env->prog->expected_attach_type == BPF_TRACE_FENTRY ||
+		    env->prog->expected_attach_type == BPF_TRACE_FEXIT)
+			return 0;
+		verbose(env, "Only faround/fentry/fexit support bpf_tracing_is_exit kfunc\n");
+		return -EINVAL;
 	}
 
 	for (i = 0; i < CALLER_SAVED_REGS; i++)
@@ -21810,6 +21821,9 @@ static int fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		   desc->func_id == special_kfunc_list[KF_bpf_rdonly_cast]) {
 		insn_buf[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_1);
 		*cnt = 1;
+	} else if (desc->func_id == special_kfunc_list[KF_bpf_tracing_is_exit]) {
+		insn_buf[0] = BPF_LDX_MEM(BPF_W, BPF_REG0, BPF_REG_1, -4);
+		*cnt = 1;
 	}
 
 	if (env->insn_aux_data[insn_idx].arg_prog) {
@@ -22529,7 +22543,7 @@ patch_map_ops_generic:
 		if (prog_type == BPF_PROG_TYPE_TRACING &&
 		    insn->imm == BPF_FUNC_get_func_arg) {
 			/* Load nr_args from ctx - 8 */
-			insn_buf[0] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, -8);
+			insn_buf[0] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, -8);
 			insn_buf[1] = BPF_JMP32_REG(BPF_JGE, BPF_REG_2, BPF_REG_0, 6);
 			insn_buf[2] = BPF_ALU64_IMM(BPF_LSH, BPF_REG_2, 3);
 			insn_buf[3] = BPF_ALU64_REG(BPF_ADD, BPF_REG_2, BPF_REG_1);
@@ -22557,7 +22571,7 @@ patch_map_ops_generic:
 			    eatype == BPF_TRACE_FAROUND ||
 			    eatype == BPF_MODIFY_RETURN) {
 				/* Load nr_args from ctx - 8 */
-				insn_buf[0] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, -8);
+				insn_buf[0] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, -8);
 				insn_buf[1] = BPF_ALU64_IMM(BPF_LSH, BPF_REG_0, 3);
 				insn_buf[2] = BPF_ALU64_REG(BPF_ADD, BPF_REG_0, BPF_REG_1);
 				insn_buf[3] = BPF_LDX_MEM(BPF_DW, BPF_REG_3, BPF_REG_0, 0);
@@ -22583,7 +22597,7 @@ patch_map_ops_generic:
 		if (prog_type == BPF_PROG_TYPE_TRACING &&
 		    insn->imm == BPF_FUNC_get_func_arg_cnt) {
 			/* Load nr_args from ctx - 8 */
-			insn_buf[0] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, -8);
+			insn_buf[0] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, -8);
 
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, 1);
 			if (!new_prog)

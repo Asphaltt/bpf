@@ -3212,7 +3212,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 
 	/* regs count  */
 	stack_size += 8;
-	nregs_off = stack_size;
+	nregs_off = stack_size; /* data format: [nregs|is_exit] */
 
 	if (flags & BPF_TRAMP_F_IP_ARG)
 		stack_size += 8; /* room for IP address argument */
@@ -3280,10 +3280,10 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 
 	/* Store number of argument registers of the traced function:
 	 *   mov rax, nr_regs
-	 *   mov QWORD PTR [rbp - nregs_off], rax
+	 *   mov DWORD PTR [rbp - nregs_off], rax
 	 */
 	emit_mov_imm64(&prog, BPF_REG_0, 0, (u32) nr_regs);
-	emit_stx(&prog, BPF_DW, BPF_REG_FP, BPF_REG_0, -nregs_off);
+	emit_stx(&prog, BPF_W, BPF_REG_FP, BPF_REG_0, -nregs_off);
 
 	if (flags & BPF_TRAMP_F_IP_ARG) {
 		/* Store IP address of the traced function:
@@ -3305,6 +3305,10 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 			goto cleanup;
 		}
 	}
+
+	if (fentry->nr_links || faround->nr_links)
+		/* save is_exit: mov dword ptr [rbp - nregs_off + 4], 0 */
+		EMIT3_off32(0xC7, 0x45, 0x100 - nregs_off + 4, 0);
 
 	if (fentry->nr_links) {
 		if (invoke_bpf(m, &prog, fentry, regs_off, run_ctx_off,
@@ -3357,6 +3361,10 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		im->ip_after_call = image + (prog - (u8 *)rw_image);
 		emit_nops(&prog, X86_PATCH_SIZE);
 	}
+
+	if (fmod_ret->nr_links || fexit->nr_links || faround->nr_links)
+		/* save is_exit: mov dword ptr [rbp - nregs_off + 4], 1 */
+		EMIT3_off32(0xC7, 0x45, 0x100 - nregs_off + 4, 1);
 
 	if (fmod_ret->nr_links) {
 		/* From Intel 64 and IA-32 Architectures Optimization

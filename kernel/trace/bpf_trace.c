@@ -1194,9 +1194,9 @@ const struct bpf_func_proto bpf_get_branch_snapshot_proto = {
 BPF_CALL_3(get_func_arg, void *, ctx, u32, n, u64 *, value)
 {
 	/* This helper call is inlined by verifier. */
-	u64 nr_args = ((u64 *)ctx)[-1];
+	u32 nr_args = ((u32 *)ctx)[-2];
 
-	if ((u64) n >= nr_args)
+	if (n >= nr_args)
 		return -EINVAL;
 	*value = ((u64 *)ctx)[n];
 	return 0;
@@ -1214,7 +1214,7 @@ static const struct bpf_func_proto bpf_get_func_arg_proto = {
 BPF_CALL_2(get_func_ret, void *, ctx, u64 *, value)
 {
 	/* This helper call is inlined by verifier. */
-	u64 nr_args = ((u64 *)ctx)[-1];
+	u32 nr_args = ((u32 *)ctx)[-2];
 
 	*value = ((u64 *)ctx)[nr_args];
 	return 0;
@@ -1231,7 +1231,7 @@ static const struct bpf_func_proto bpf_get_func_ret_proto = {
 BPF_CALL_1(get_func_arg_cnt, void *, ctx)
 {
 	/* This helper call is inlined by verifier. */
-	return ((u64 *)ctx)[-1];
+	return ((u32 *)ctx)[-2];
 }
 
 static const struct bpf_func_proto bpf_get_func_arg_cnt_proto = {
