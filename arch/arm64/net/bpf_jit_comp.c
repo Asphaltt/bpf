@@ -2517,6 +2517,7 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 	int run_ctx_off;
 	int oargs_off;
 	int nfuncargs;
+	struct bpf_tramp_links *faround = &tlinks[BPF_TRAMP_FAROUND];
 	struct bpf_tramp_links *fentry = &tlinks[BPF_TRAMP_FENTRY];
 	struct bpf_tramp_links *fexit = &tlinks[BPF_TRAMP_FEXIT];
 	struct bpf_tramp_links *fmod_ret = &tlinks[BPF_TRAMP_MODIFY_RETURN];
@@ -2566,7 +2567,7 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 	if (flags & BPF_TRAMP_F_IP_ARG)
 		stack_size += 8;
 
-	nfuncargs_off = stack_size;
+	nfuncargs_off = stack_size; /* data format [nfuncargs:is_exit] */
 	/* room for args count */
 	stack_size += 8;
 
@@ -2626,8 +2627,8 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 	}
 
 	/* save arg regs count*/
-	emit(A64_MOVZ(1, A64_R(10), nfuncargs, 0), ctx);
-	emit(A64_STR64I(A64_R(10), A64_SP, nfuncargs_off), ctx);
+	emit(A64_MOVZ(0, A64_R(10), nfuncargs, 0), ctx);
+	emit(A64_STR32I(A64_R(10), A64_SP, nfuncargs_off), ctx);
 
 	/* save args for bpf */
 	save_args(ctx, bargs_off, oargs_off, m, a, false);
@@ -2645,8 +2646,18 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 		emit_call((const u64)__bpf_tramp_enter, ctx);
 	}
 
+	if (fentry->nr_links || faround->nr_links) {
+		emit(A64_MOVZ(0, A64_R(10), 0, 0), ctx);
+		emit(A64_STR32I(A64_R(10), A64_SP, nfuncargs_off + 4), ctx);
+	}
+
 	for (i = 0; i < fentry->nr_links; i++)
 		invoke_bpf_prog(ctx, fentry->links[i], bargs_off,
+				retval_off, run_ctx_off,
+				flags & BPF_TRAMP_F_RET_FENTRY_RET);
+
+	for (i = 0; i < faround->nr_links; i++)
+		invoke_bpf_prog(ctx, faround->links[i], bargs_off,
 				retval_off, run_ctx_off,
 				flags & BPF_TRAMP_F_RET_FENTRY_RET);
 
@@ -2674,6 +2685,11 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 		emit(A64_NOP, ctx);
 	}
 
+	if (fmod_ret->nr_links || fexit->nr_links || faround->nr_links) {
+		emit(A64_MOVZ(0, A64_R(10), 0, 1), ctx);
+		emit(A64_STR32I(A64_R(10), A64_SP, nfuncargs_off + 4), ctx);
+	}
+
 	/* update the branches saved in invoke_bpf_mod_ret with cbnz */
 	for (i = 0; i < fmod_ret->nr_links && ctx->image != NULL; i++) {
 		int offset = &ctx->image[ctx->idx] - branches[i];
@@ -2682,6 +2698,10 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 
 	for (i = 0; i < fexit->nr_links; i++)
 		invoke_bpf_prog(ctx, fexit->links[i], bargs_off, retval_off,
+				run_ctx_off, false);
+
+	for (i = 0; i < faround->nr_links; i++)
+		invoke_bpf_prog(ctx, faround->links[i], bargs_off, retval_off,
 				run_ctx_off, false);
 
 	if (flags & BPF_TRAMP_F_CALL_ORIG) {
