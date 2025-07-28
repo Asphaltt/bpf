@@ -1,0 +1,52 @@
+From 03ba7d78c857c815815dcd060a11b891d767ad9f Mon Sep 17 00:00:00 2001
+From: Leon Hwang <leon.hwang@linux.dev>
+Date: Mon, 28 Jul 2025 22:01:06 +0800
+Subject: [RFC PATCH bpf-next 0/5] bpf: Extend bpf syscall with common
+ attributes support
+
+This proposal builds upon the discussion in
+"[PATCH bpf-next v4 0/4] bpf: Improve error reporting for freplace attachment failure"[1],
+and is also relevant to ongoing efforts such as tracing multi-link attach
+failures[2].
+
+This patch set introduces support for *common attributes* in the 'bpf()'
+syscall, providing a unified mechanism for passing shared metadata across
+all BPF commands.
+
+The initial set of common attributes includes:
+
+1. 'log_buf': User-provided buffer for storing log output.
+2. 'log_size': Size of the provided log buffer.
+3. 'log_level': Verbosity level for logging.
+
+With this extension, the 'bpf()' syscall will be able to return meaningful
+error messages (e.g., when a 'freplace' program fails to attach),
+improving debuggability and user experience.
+
+Links:
+[1] https://lore.kernel.org/bpf/20250224153352.64689-1-leon.hwang@linux.dev/
+[2] https://lore.kernel.org/bpf/20250703121521.1874196-1-dongml2@chinatelecom.cn/
+
+Leon Hwang (5):
+  bpf: Extend bpf syscall with common attributes support
+  libbpf: Add support for extended bpf syscall
+  bpf: Report freplace attach failure reason via extended syscall
+  libbpf: Capture error message on freplace attach failure
+  selftests/bpf: Add case to test freplace attach failure log
+
+ include/uapi/linux/bpf.h                      |  7 +++
+ kernel/bpf/syscall.c                          | 58 +++++++++++++++----
+ tools/include/uapi/linux/bpf.h                |  7 +++
+ tools/lib/bpf/bpf.c                           | 58 ++++++++++++++++++-
+ tools/lib/bpf/bpf.h                           |  3 +
+ tools/lib/bpf/features.c                      |  8 +++
+ tools/lib/bpf/libbpf.c                        | 18 ++++--
+ tools/lib/bpf/libbpf.h                        |  4 ++
+ tools/lib/bpf/libbpf.map                      |  3 +
+ tools/lib/bpf/libbpf_internal.h               |  2 +
+ .../bpf/prog_tests/tracing_failure.c          | 43 ++++++++++++++
+ 11 files changed, 193 insertions(+), 18 deletions(-)
+
+--
+2.50.1
+

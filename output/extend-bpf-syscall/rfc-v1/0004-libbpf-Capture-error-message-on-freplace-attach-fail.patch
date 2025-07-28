@@ -1,0 +1,154 @@
+From 086dd58a42095497e9567ec4789e85fadf7c14a1 Mon Sep 17 00:00:00 2001
+From: Leon Hwang <leon.hwang@linux.dev>
+Date: Mon, 21 Jul 2025 15:50:03 +0800
+Subject: [RFC PATCH bpf-next 4/5] libbpf: Capture error message on freplace
+ attach failure
+
+Extend 'bpf_link_create()' to support capturing log output from the kernel
+when creating a freplace link.
+
+Additionally, introduce a new API, 'bpf_program__attach_freplace_log()',
+to allow users to retrieve detailed error message when a freplace program
+fails to attach.
+
+Signed-off-by: Leon Hwang <leon.hwang@linux.dev>
+---
+ tools/lib/bpf/bpf.c      | 14 ++++++++++++--
+ tools/lib/bpf/bpf.h      |  2 ++
+ tools/lib/bpf/libbpf.c   | 18 ++++++++++++++----
+ tools/lib/bpf/libbpf.h   |  4 ++++
+ tools/lib/bpf/libbpf.map |  1 +
+ 5 files changed, 33 insertions(+), 6 deletions(-)
+
+diff --git a/tools/lib/bpf/bpf.c b/tools/lib/bpf/bpf.c
+index de0c5c6c8ae6..25e88219d140 100644
+--- a/tools/lib/bpf/bpf.c
++++ b/tools/lib/bpf/bpf.c
+@@ -772,6 +772,7 @@ int bpf_link_create(int prog_fd, int target_fd,
+ {
+ 	const size_t attr_sz = offsetofend(union bpf_attr, link_create);
+ 	__u32 target_btf_id, iter_info_len, relative_id;
++	struct bpf_common_attr common_attrs;
+ 	int fd, err, relative_fd;
+ 	union bpf_attr attr;
+ 
+@@ -785,7 +786,9 @@ int bpf_link_create(int prog_fd, int target_fd,
+ 	if (iter_info_len || target_btf_id) {
+ 		if (iter_info_len && target_btf_id)
+ 			return libbpf_err(-EINVAL);
+-		if (!OPTS_ZEROED(opts, target_btf_id))
++		if (iter_info_len && !OPTS_ZEROED(opts, target_btf_id))
++			return libbpf_err(-EINVAL);
++		if (target_btf_id && !OPTS_ZEROED(opts, tracing.log_size))
+ 			return libbpf_err(-EINVAL);
+ 	}
+ 
+@@ -795,7 +798,12 @@ int bpf_link_create(int prog_fd, int target_fd,
+ 	attr.link_create.attach_type = attach_type;
+ 	attr.link_create.flags = OPTS_GET(opts, flags, 0);
+ 
++	memset(&common_attrs, 0, sizeof(common_attrs));
+ 	if (target_btf_id) {
++		common_attrs.log_buf = (__u64) OPTS_GET(opts, tracing.log_buf, NULL);
++		common_attrs.log_size = OPTS_GET(opts, tracing.log_size, 0);
++		if (common_attrs.log_buf && !feat_supported(NULL, FEAT_EXTENDED_SYSCALL))
++			return libbpf_err(-EOPNOTSUPP);
+ 		attr.link_create.target_btf_id = target_btf_id;
+ 		goto proceed;
+ 	}
+@@ -931,7 +939,9 @@ int bpf_link_create(int prog_fd, int target_fd,
+ 		break;
+ 	}
+ proceed:
+-	fd = sys_bpf_fd(BPF_LINK_CREATE, &attr, attr_sz);
++	fd = !common_attrs.log_buf ? sys_bpf_fd(BPF_LINK_CREATE, &attr, attr_sz)
++				   : sys_bpf_fd_extended(BPF_LINK_CREATE, &attr, attr_sz,
++							 &common_attrs, sizeof(common_attrs));
+ 	if (fd >= 0)
+ 		return fd;
+ 	/* we'll get EINVAL if LINK_CREATE doesn't support attaching fentry
+diff --git a/tools/lib/bpf/bpf.h b/tools/lib/bpf/bpf.h
+index 38819071ecbe..5720d3e3df76 100644
+--- a/tools/lib/bpf/bpf.h
++++ b/tools/lib/bpf/bpf.h
+@@ -422,6 +422,8 @@ struct bpf_link_create_opts {
+ 		} uprobe_multi;
+ 		struct {
+ 			__u64 cookie;
++			const char *log_buf;
++			unsigned int log_size;
+ 		} tracing;
+ 		struct {
+ 			__u32 pf;
+diff --git a/tools/lib/bpf/libbpf.c b/tools/lib/bpf/libbpf.c
+index e067cb5776bd..9748466691f3 100644
+--- a/tools/lib/bpf/libbpf.c
++++ b/tools/lib/bpf/libbpf.c
+@@ -12949,9 +12949,11 @@ bpf_program__attach_netkit(const struct bpf_program *prog, int ifindex,
+ 	return bpf_program_attach_fd(prog, ifindex, "netkit", &link_create_opts);
+ }
+ 
+-struct bpf_link *bpf_program__attach_freplace(const struct bpf_program *prog,
+-					      int target_fd,
+-					      const char *attach_func_name)
++struct bpf_link *bpf_program__attach_freplace_log(const struct bpf_program *prog,
++						  int target_fd,
++						  const char *attach_func_name,
++						  const char *log_buf,
++						  unsigned int log_size)
+ {
+ 	int btf_id;
+ 
+@@ -12975,7 +12977,8 @@ struct bpf_link *bpf_program__attach_freplace(const struct bpf_program *prog,
+ 			return libbpf_err_ptr(btf_id);
+ 
+ 		target_opts.target_btf_id = btf_id;
+-
++		target_opts.tracing.log_buf = log_buf;
++		target_opts.tracing.log_size = log_size;
+ 		return bpf_program_attach_fd(prog, target_fd, "freplace",
+ 					     &target_opts);
+ 	} else {
+@@ -12986,6 +12989,13 @@ struct bpf_link *bpf_program__attach_freplace(const struct bpf_program *prog,
+ 	}
+ }
+ 
++struct bpf_link *bpf_program__attach_freplace(const struct bpf_program *prog,
++					      int target_fd,
++					      const char *attach_func_name)
++{
++	return bpf_program__attach_freplace_log(prog, target_fd, attach_func_name, NULL, 0);
++}
++
+ struct bpf_link *
+ bpf_program__attach_iter(const struct bpf_program *prog,
+ 			 const struct bpf_iter_attach_opts *opts)
+diff --git a/tools/lib/bpf/libbpf.h b/tools/lib/bpf/libbpf.h
+index d1cf813a057b..01a0bf76adf5 100644
+--- a/tools/lib/bpf/libbpf.h
++++ b/tools/lib/bpf/libbpf.h
+@@ -829,6 +829,10 @@ bpf_program__attach_sockmap(const struct bpf_program *prog, int map_fd);
+ LIBBPF_API struct bpf_link *
+ bpf_program__attach_xdp(const struct bpf_program *prog, int ifindex);
+ LIBBPF_API struct bpf_link *
++bpf_program__attach_freplace_log(const struct bpf_program *prog,
++				 int target_fd, const char *attach_func_name,
++				 const char *log_buf, unsigned int log_size);
++LIBBPF_API struct bpf_link *
+ bpf_program__attach_freplace(const struct bpf_program *prog,
+ 			     int target_fd, const char *attach_func_name);
+ 
+diff --git a/tools/lib/bpf/libbpf.map b/tools/lib/bpf/libbpf.map
+index 83d3d1af5ed1..25cd2d54b7d9 100644
+--- a/tools/lib/bpf/libbpf.map
++++ b/tools/lib/bpf/libbpf.map
+@@ -449,5 +449,6 @@ LIBBPF_1.6.0 {
+ 
+ LIBBPF_1.7.0 {
+ 	global:
++		bpf_program__attach_freplace_log;
+ 		probe_sys_bpf_extended;
+ } LIBBPF_1.6.0;
+-- 
+2.50.1
+

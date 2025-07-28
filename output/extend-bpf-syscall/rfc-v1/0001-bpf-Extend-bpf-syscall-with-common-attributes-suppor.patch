@@ -1,0 +1,122 @@
+From 7fe91116d77646b02a3a199ddc9f1b9cc9bf5189 Mon Sep 17 00:00:00 2001
+From: Leon Hwang <leon.hwang@linux.dev>
+Date: Mon, 21 Jul 2025 13:58:14 +0800
+Subject: [RFC PATCH bpf-next 1/5] bpf: Extend bpf syscall with common
+ attributes support
+
+This patch extends the 'bpf()' syscall to support a set of common
+attributes shared across all BPF commands:
+
+1. 'log_buf': User-provided buffer for storing logs
+2. 'log_size': Size of the log buffer
+3. 'log_level': Log verbosity level
+
+These common attributes are passed as the 4th argument to the 'bpf()'
+syscall, with the 5th argument specifying the size of this structure.
+
+To indicate the use of these common attributes from userspace, a new flag
+'BPF_COMMON_ATTRS' ('1 << 16') is introduced. This flag is OR-ed into the
+'cmd' field of the syscall.
+
+When 'cmd & BPF_COMMON_ATTRS' is set, the kernel will copy the common
+attributes from userspace into kernel space for use.
+
+Signed-off-by: Leon Hwang <leon.hwang@linux.dev>
+---
+ include/uapi/linux/bpf.h       |  7 +++++++
+ kernel/bpf/syscall.c           | 19 +++++++++++++++----
+ tools/include/uapi/linux/bpf.h |  7 +++++++
+ 3 files changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/include/uapi/linux/bpf.h b/include/uapi/linux/bpf.h
+index 233de8677382..5014baccf065 100644
+--- a/include/uapi/linux/bpf.h
++++ b/include/uapi/linux/bpf.h
+@@ -1474,6 +1474,13 @@ struct bpf_stack_build_id {
+ 	};
+ };
+ 
++struct bpf_common_attr {
++	__u64 log_buf;
++	__u32 log_size;
++	__u32 log_level;
++};
++
++#define BPF_COMMON_ATTRS (1 << 16)
+ #define BPF_OBJ_NAME_LEN 16U
+ 
+ enum {
+diff --git a/kernel/bpf/syscall.c b/kernel/bpf/syscall.c
+index e63039817af3..ca7ce8474812 100644
+--- a/kernel/bpf/syscall.c
++++ b/kernel/bpf/syscall.c
+@@ -5980,8 +5980,10 @@ static int prog_stream_read(union bpf_attr *attr)
+ 	return ret;
+ }
+ 
+-static int __sys_bpf(enum bpf_cmd cmd, bpfptr_t uattr, unsigned int size)
++static int __sys_bpf(enum bpf_cmd cmd, bpfptr_t uattr, unsigned int size,
++		     bpfptr_t uattr_common, unsigned int size_common)
+ {
++	struct bpf_common_attr common_attrs;
+ 	union bpf_attr attr;
+ 	int err;
+ 
+@@ -5995,6 +5997,14 @@ static int __sys_bpf(enum bpf_cmd cmd, bpfptr_t uattr, unsigned int size)
+ 	if (copy_from_bpfptr(&attr, uattr, size) != 0)
+ 		return -EFAULT;
+ 
++	memset(&common_attrs, 0, sizeof(common_attrs));
++	if (cmd & BPF_COMMON_ATTRS) {
++		cmd &= ~BPF_COMMON_ATTRS;
++		size_common = min_t(u32, size_common, sizeof(common_attrs));
++		if (uattr_common.user && copy_from_bpfptr(&common_attrs, uattr_common, size_common))
++			return -EFAULT;
++	}
++
+ 	err = security_bpf(cmd, &attr, size, uattr.is_kernel);
+ 	if (err < 0)
+ 		return err;
+@@ -6127,9 +6137,10 @@ static int __sys_bpf(enum bpf_cmd cmd, bpfptr_t uattr, unsigned int size)
+ 	return err;
+ }
+ 
+-SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, size)
++SYSCALL_DEFINE5(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, size,
++		struct bpf_common_attr __user *, uattr_common, unsigned int, size_common)
+ {
+-	return __sys_bpf(cmd, USER_BPFPTR(uattr), size);
++	return __sys_bpf(cmd, USER_BPFPTR(uattr), size, USER_BPFPTR(uattr_common), size_common);
+ }
+ 
+ static bool syscall_prog_is_valid_access(int off, int size,
+@@ -6160,7 +6171,7 @@ BPF_CALL_3(bpf_sys_bpf, int, cmd, union bpf_attr *, attr, u32, attr_size)
+ 	default:
+ 		return -EINVAL;
+ 	}
+-	return __sys_bpf(cmd, KERNEL_BPFPTR(attr), attr_size);
++	return __sys_bpf(cmd, KERNEL_BPFPTR(attr), attr_size, KERNEL_BPFPTR(NULL), 0);
+ }
+ 
+ 
+diff --git a/tools/include/uapi/linux/bpf.h b/tools/include/uapi/linux/bpf.h
+index 233de8677382..5014baccf065 100644
+--- a/tools/include/uapi/linux/bpf.h
++++ b/tools/include/uapi/linux/bpf.h
+@@ -1474,6 +1474,13 @@ struct bpf_stack_build_id {
+ 	};
+ };
+ 
++struct bpf_common_attr {
++	__u64 log_buf;
++	__u32 log_size;
++	__u32 log_level;
++};
++
++#define BPF_COMMON_ATTRS (1 << 16)
+ #define BPF_OBJ_NAME_LEN 16U
+ 
+ enum {
+-- 
+2.50.1
+
