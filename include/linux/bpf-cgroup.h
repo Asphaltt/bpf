@@ -24,11 +24,14 @@ struct ctl_table_header;
 struct task_struct;
 
 unsigned int __cgroup_bpf_run_lsm_sock(const void *ctx,
-				       const struct bpf_insn *insn);
+				       const struct bpf_insn *insn,
+				       const u32 *tcc);
 unsigned int __cgroup_bpf_run_lsm_socket(const void *ctx,
-					 const struct bpf_insn *insn);
+					 const struct bpf_insn *insn,
+					 const u32 *tcc);
 unsigned int __cgroup_bpf_run_lsm_current(const void *ctx,
-					  const struct bpf_insn *insn);
+					  const struct bpf_insn *insn,
+					  const u32 *tcc);
 
 #ifdef CONFIG_CGROUP_BPF
 

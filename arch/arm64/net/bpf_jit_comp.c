@@ -28,8 +28,8 @@
 #include "bpf_jit.h"
 
 #define TMP_REG_1 (MAX_BPF_JIT_REG + 0)
-#define TMP_REG_2 (MAX_BPF_JIT_REG + 1)
-#define TCCNT_PTR (MAX_BPF_JIT_REG + 2)
+#define TCCNT_PTR (MAX_BPF_JIT_REG + 1) /* same as BPF_REG_TAIL_CALL */
+#define TMP_REG_2 (MAX_BPF_JIT_REG + 2)
 #define TMP_REG_3 (MAX_BPF_JIT_REG + 3)
 #define PRIVATE_SP (MAX_BPF_JIT_REG + 4)
 #define ARENA_VM_START (MAX_BPF_JIT_REG + 5)
@@ -358,19 +358,6 @@ static bool is_lsi_offset(int offset, int scale)
  *      // PROLOGUE_OFFSET
  *	// save callee-saved registers
  */
-static void prepare_bpf_tail_call_cnt(struct jit_ctx *ctx)
-{
-	const bool is_main_prog = !bpf_is_subprog(ctx->prog);
-	const u8 ptr = bpf2a64[TCCNT_PTR];
-
-	if (is_main_prog) {
-		/* Initialize tail_call_cnt. */
-		emit(A64_PUSH(A64_ZR, ptr, A64_SP), ctx);
-		emit(A64_MOV(1, ptr, A64_SP), ctx);
-	} else
-		emit(A64_PUSH(ptr, ptr, A64_SP), ctx);
-}
-
 static void find_used_callee_regs(struct jit_ctx *ctx)
 {
 	int i;
@@ -517,6 +504,7 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 	const u8 fp = bpf2a64[BPF_REG_FP];
 	const u8 arena_vm_base = bpf2a64[ARENA_VM_START];
 	const u8 priv_sp = bpf2a64[PRIVATE_SP];
+	const u8 ptr = bpf2a64[TCCNT_PTR];
 	void __percpu *priv_stack_ptr;
 	int cur_offset;
 
@@ -565,10 +553,10 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 		/* Save FP and LR registers to stay align with ARM64 AAPCS */
 		emit(A64_PUSH(A64_FP, A64_LR, A64_SP), ctx);
 		emit(A64_MOV(1, A64_FP, A64_SP), ctx);
-
-		prepare_bpf_tail_call_cnt(ctx);
+		emit(A64_PUSH(A64_ZR, ptr, A64_SP), ctx);
 
 		if (!ebpf_from_cbpf && is_main_prog) {
+			emit(A64_MOV(1, TCCNT_PTR, A64_R(2)), ctx);
 			cur_offset = ctx->idx - idx0;
 			if (cur_offset != PROLOGUE_OFFSET) {
 				pr_err_once("PROLOGUE_OFFSET = %d, expected %d!\n",
@@ -628,12 +616,9 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx)
 
 	const u8 tmp = bpf2a64[TMP_REG_1];
 	const u8 prg = bpf2a64[TMP_REG_2];
-	const u8 tcc = bpf2a64[TMP_REG_3];
-	const u8 ptr = bpf2a64[TCCNT_PTR];
 	size_t off;
 	__le32 *branch1 = NULL;
 	__le32 *branch2 = NULL;
-	__le32 *branch3 = NULL;
 
 	/* if (index >= array->map.max_entries)
 	 *     goto out;
@@ -646,19 +631,6 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx)
 	branch1 = ctx->image + ctx->idx;
 	emit(A64_NOP, ctx);
 
-	/*
-	 * if ((*tail_call_cnt_ptr) >= MAX_TAIL_CALL_CNT)
-	 *     goto out;
-	 */
-	emit_a64_mov_i64(tmp, MAX_TAIL_CALL_CNT, ctx);
-	emit(A64_LDR64I(tcc, ptr, 0), ctx);
-	emit(A64_CMP(1, tcc, tmp), ctx);
-	branch2 = ctx->image + ctx->idx;
-	emit(A64_NOP, ctx);
-
-	/* (*tail_call_cnt_ptr)++; */
-	emit(A64_ADD_I(1, tcc, tcc, 1), ctx);
-
 	/* prog = array->ptrs[index];
 	 * if (prog == NULL)
 	 *     goto out;
@@ -668,11 +640,8 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx)
 	emit(A64_ADD(1, tmp, r2, tmp), ctx);
 	emit(A64_LSL(1, prg, r3, 3), ctx);
 	emit(A64_LDR64(prg, tmp, prg), ctx);
-	branch3 = ctx->image + ctx->idx;
+	branch2 = ctx->image + ctx->idx;
 	emit(A64_NOP, ctx);
-
-	/* Update tail_call_cnt if the slot is populated. */
-	emit(A64_STR64I(tcc, ptr, 0), ctx);
 
 	/* restore SP */
 	if (ctx->stack_size && !ctx->priv_sp_used)
@@ -692,10 +661,7 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx)
 		*branch1 = cpu_to_le32(A64_B_(A64_COND_CS, off));
 
 		off = &ctx->image[ctx->idx] - branch2;
-		*branch2 = cpu_to_le32(A64_B_(A64_COND_CS, off));
-
-		off = &ctx->image[ctx->idx] - branch3;
-		*branch3 = cpu_to_le32(A64_CBZ(1, prg, off));
+		*branch2 = cpu_to_le32(A64_CBZ(1, prg, off));
 	}
 
 	return 0;
@@ -2227,6 +2193,12 @@ bool bpf_jit_supports_subprog_tailcalls(void)
 	return true;
 }
 
+/* Indicate the JIT backend supports BPF_REG_TAIL_CALL. */
+bool bpf_jit_supports_reg_tail_call(void)
+{
+	return true;
+}
+
 static void invoke_bpf_prog(struct jit_ctx *ctx, struct bpf_tramp_link *l,
 			    int bargs_off, int retval_off, int run_ctx_off,
 			    bool save_ret)
@@ -2236,6 +2208,8 @@ static void invoke_bpf_prog(struct jit_ctx *ctx, struct bpf_tramp_link *l,
 	u64 exit_prog;
 	struct bpf_prog *p = l->link.prog;
 	int cookie_off = offsetof(struct bpf_tramp_run_ctx, bpf_cookie);
+	int tcc_off = offsetof(struct bpf_tramp_run_ctx, tail_call_cnt);
+	const u8 tmp = bpf2a64[TMP_REG_1];
 
 	enter_prog = (u64)bpf_trampoline_enter(p);
 	exit_prog = (u64)bpf_trampoline_exit(p);
@@ -2273,6 +2247,11 @@ static void invoke_bpf_prog(struct jit_ctx *ctx, struct bpf_tramp_link *l,
 	emit(A64_ADD_I(1, A64_R(0), A64_SP, bargs_off), ctx);
 	if (!p->jited)
 		emit_addr_mov_i64(A64_R(1), (const u64)p->insnsi, ctx);
+	if (p->aux->tail_call_reachable) {
+		emit(A64_ADD_I(1, A64_R(2), A64_SP, run_ctx_off + tcc_off), ctx);
+		emit(A64_MOVZ(0, tmp, 0, 0), ctx);
+		emit(A64_STR32I(tmp, A64_R(2), 0), ctx);
+	}
 
 	emit_call((const u64)p->bpf_func, ctx);
 

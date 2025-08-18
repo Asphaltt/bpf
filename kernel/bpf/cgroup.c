@@ -94,7 +94,8 @@ bpf_prog_run_array_cg(const struct cgroup_bpf *cgrp,
 }
 
 unsigned int __cgroup_bpf_run_lsm_sock(const void *ctx,
-				       const struct bpf_insn *insn)
+				       const struct bpf_insn *insn,
+				       const u32 *tcc)
 {
 	const struct bpf_prog *shim_prog;
 	struct sock *sk;
@@ -116,7 +117,8 @@ unsigned int __cgroup_bpf_run_lsm_sock(const void *ctx,
 }
 
 unsigned int __cgroup_bpf_run_lsm_socket(const void *ctx,
-					 const struct bpf_insn *insn)
+					 const struct bpf_insn *insn,
+					 const u32 *tcc)
 {
 	const struct bpf_prog *shim_prog;
 	struct socket *sock;
@@ -138,7 +140,8 @@ unsigned int __cgroup_bpf_run_lsm_socket(const void *ctx,
 }
 
 unsigned int __cgroup_bpf_run_lsm_current(const void *ctx,
-					  const struct bpf_insn *insn)
+					  const struct bpf_insn *insn,
+					  const u32 *tcc)
 {
 	const struct bpf_prog *shim_prog;
 	struct cgroup *cgrp;

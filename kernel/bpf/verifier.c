@@ -22395,6 +22395,15 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 			insn->imm = 0;
 			insn->code = BPF_JMP | BPF_TAIL_CALL;
 
+			cnt = 0;
+			if (bpf_jit_supports_reg_tail_call()) {
+				insn_buf[cnt++] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_TAIL_CALL, 0);
+				insn_buf[cnt++] = BPF_JMP_IMM(BPF_JGE, BPF_REG_0, MAX_TAIL_CALL_CNT, 3);
+				insn_buf[cnt++] = BPF_ALU32_IMM(BPF_ADD, BPF_REG_0, 1);
+				insn_buf[cnt++] = BPF_STX_MEM(BPF_W, BPF_REG_TAIL_CALL, BPF_REG_0, 0);
+				insn_buf[cnt++] = *insn;
+			}
+
 			aux = &env->insn_aux_data[i + delta];
 			if (env->bpf_capable && !prog->blinding_requested &&
 			    prog->jit_requested &&
@@ -22405,9 +22414,19 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 					.reason = BPF_POKE_REASON_TAIL_CALL,
 					.tail_call.map = aux->map_ptr_state.map_ptr,
 					.tail_call.key = bpf_map_key_immediate(aux),
-					.insn_idx = i + delta,
 				};
 
+				if (bpf_jit_supports_reg_tail_call()) {
+					new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
+					if (!new_prog)
+						return -ENOMEM;
+
+					delta    += cnt - 1;
+					env->prog = prog = new_prog;
+					insn      = new_prog->insnsi + i + delta;
+				}
+
+				desc.insn_idx = i + delta;
 				ret = bpf_jit_add_poke_descriptor(prog, &desc);
 				if (ret < 0) {
 					verbose(env, "adding tail call poke descriptor failed\n");
@@ -22418,8 +22437,18 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 				goto next_insn;
 			}
 
-			if (!bpf_map_ptr_unpriv(aux))
+			if (!bpf_map_ptr_unpriv(aux)) {
+				if (bpf_jit_supports_reg_tail_call()) {
+					new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
+					if (!new_prog)
+						return -ENOMEM;
+
+					delta    += cnt - 1;
+					env->prog = prog = new_prog;
+					insn      = new_prog->insnsi + i + delta;
+				}
 				goto next_insn;
+			}
 
 			/* instead of changing every JIT dealing with tail_call
 			 * emit two extra insns:
@@ -22432,15 +22461,19 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 				return -EINVAL;
 			}
 
+			if (bpf_jit_supports_reg_tail_call()) {
+				insn_buf[1] = BPF_JMP_IMM(BPF_JGE, BPF_REG_0, MAX_TAIL_CALL_CNT, 5);
+				cnt = 4;
+			} else {
+				cnt = 0;
+			}
 			map_ptr = aux->map_ptr_state.map_ptr;
-			insn_buf[0] = BPF_JMP_IMM(BPF_JGE, BPF_REG_3,
-						  map_ptr->max_entries, 2);
-			insn_buf[1] = BPF_ALU32_IMM(BPF_AND, BPF_REG_3,
-						    container_of(map_ptr,
-								 struct bpf_array,
-								 map)->index_mask);
-			insn_buf[2] = *insn;
-			cnt = 3;
+			insn_buf[cnt++] = BPF_JMP_IMM(BPF_JGE, BPF_REG_3,
+						      map_ptr->max_entries, 2);
+			insn_buf[cnt++] = BPF_ALU32_IMM(BPF_AND, BPF_REG_3,
+							container_of(map_ptr, struct bpf_array,
+								     map)->index_mask);
+			insn_buf[cnt++] = *insn;
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -23581,6 +23614,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			bpf_log(log, "Subprog %s doesn't exist\n", tname);
 			return -EINVAL;
 		}
+		tgt_info->subprog = subprog;
 		if (aux->func && aux->func[subprog]->aux->exception_cb) {
 			bpf_log(log,
 				"%s programs cannot attach to exception callback\n",
@@ -24000,8 +24034,11 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 	if (!tr)
 		return -ENOMEM;
 
-	if (tgt_prog && tgt_prog->aux->tail_call_reachable)
+	if (tgt_prog && tgt_prog->aux->tail_call_reachable) {
 		tr->flags = BPF_TRAMP_F_TAIL_CALL_CTX;
+		if (tgt_info.subprog == 0)
+			tr->flags |= BPF_TRAMP_F_TAIL_CALL_CTX_ENTRY;
+	}
 
 	prog->aux->dst_trampoline = tr;
 	return 0;

@@ -2363,7 +2363,8 @@ void bpf_patch_call_args(struct bpf_insn *insn, u32 stack_depth)
 #endif
 
 static unsigned int __bpf_prog_ret0_warn(const void *ctx,
-					 const struct bpf_insn *insn)
+					 const struct bpf_insn *insn,
+					 const u32 *tcc)
 {
 	/* If this handler ever gets executed, then BPF_JIT_ALWAYS_ON
 	 * is not working properly, or interpreter is being used when
@@ -2556,7 +2557,8 @@ finalize:
 EXPORT_SYMBOL_GPL(bpf_prog_select_runtime);
 
 static unsigned int __bpf_prog_ret1(const void *ctx,
-				    const struct bpf_insn *insn)
+				    const struct bpf_insn *insn,
+				    const u32 *tcc)
 {
 	return 1;
 }
@@ -3094,6 +3096,12 @@ bool __weak bpf_jit_inlines_helper_call(s32 imm)
 
 /* Return TRUE if the JIT backend supports mixing bpf2bpf and tailcalls. */
 bool __weak bpf_jit_supports_subprog_tailcalls(void)
+{
+	return false;
+}
+
+/* Return TRUE if the JIT backend supports BPF_REG_TAIL_CALL. */
+bool __weak bpf_jit_supports_reg_tail_call(void)
 {
 	return false;
 }

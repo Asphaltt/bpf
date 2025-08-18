@@ -415,7 +415,8 @@ static int bpf_prog_offload_translate(struct bpf_prog *prog)
 }
 
 static unsigned int bpf_prog_warn_on_exec(const void *ctx,
-					  const struct bpf_insn *insn)
+					  const struct bpf_insn *insn,
+					  const u32 *tcc)
 {
 	WARN(1, "attempt to execute device eBPF program on the host!");
 	return 0;

@@ -63,6 +63,9 @@ struct ctl_table_header;
 #define MAX_BPF_EXT_REG		(MAX_BPF_REG + 1)
 #define MAX_BPF_JIT_REG		MAX_BPF_EXT_REG
 
+/* An internal register used as tail_call_cnt_ptr for tail call at runtime. */
+#define BPF_REG_TAIL_CALL	(MAX_BPF_JIT_REG + 1)
+
 /* unused opcode to mark special call to bpf_tail_call() helper */
 #define BPF_TAIL_CALL	0xf0
 
@@ -691,14 +694,14 @@ extern int (*nfct_btf_struct_access)(struct bpf_verifier_log *log,
 
 typedef unsigned int (*bpf_dispatcher_fn)(const void *ctx,
 					  const struct bpf_insn *insnsi,
-					  unsigned int (*bpf_func)(const void *,
-								   const struct bpf_insn *));
+					  const u32 *tcc,
+					  bpf_func_t bpf_func);
 
 static __always_inline u32 __bpf_prog_run(const struct bpf_prog *prog,
 					  const void *ctx,
 					  bpf_dispatcher_fn dfunc)
 {
-	u32 ret;
+	u32 ret, tail_call_cnt = 0;
 
 	cant_migrate();
 	if (static_branch_unlikely(&bpf_stats_enabled_key)) {
@@ -706,7 +709,7 @@ static __always_inline u32 __bpf_prog_run(const struct bpf_prog *prog,
 		u64 duration, start = sched_clock();
 		unsigned long flags;
 
-		ret = dfunc(ctx, prog->insnsi, prog->bpf_func);
+		ret = dfunc(ctx, prog->insnsi, &tail_call_cnt, prog->bpf_func);
 
 		duration = sched_clock() - start;
 		stats = this_cpu_ptr(prog->stats);
@@ -715,7 +718,7 @@ static __always_inline u32 __bpf_prog_run(const struct bpf_prog *prog,
 		u64_stats_add(&stats->nsecs, duration);
 		u64_stats_update_end_irqrestore(&stats->syncp, flags);
 	} else {
-		ret = dfunc(ctx, prog->insnsi, prog->bpf_func);
+		ret = dfunc(ctx, prog->insnsi, &tail_call_cnt, prog->bpf_func);
 	}
 	return ret;
 }
@@ -1139,6 +1142,7 @@ void bpf_jit_compile(struct bpf_prog *prog);
 bool bpf_jit_needs_zext(void);
 bool bpf_jit_inlines_helper_call(s32 imm);
 bool bpf_jit_supports_subprog_tailcalls(void);
+bool bpf_jit_supports_reg_tail_call(void);
 bool bpf_jit_supports_percpu_insn(void);
 bool bpf_jit_supports_kfunc_call(void);
 bool bpf_jit_supports_far_kfunc_call(void);

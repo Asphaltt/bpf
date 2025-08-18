@@ -70,7 +70,8 @@ typedef int (*bpf_iter_init_seq_priv_t)(void *private_data,
 					struct bpf_iter_aux_info *aux);
 typedef void (*bpf_iter_fini_seq_priv_t)(void *private_data);
 typedef unsigned int (*bpf_func_t)(const void *,
-				   const struct bpf_insn *);
+				   const struct bpf_insn *,
+				   const u32 *tcc);
 struct bpf_iter_seq_info {
 	const struct seq_operations *seq_ops;
 	bpf_iter_init_seq_priv_t init_seq_private;
@@ -1170,6 +1171,8 @@ struct btf_func_model {
  */
 #define BPF_TRAMP_F_INDIRECT		BIT(8)
 
+#define BPF_TRAMP_F_TAIL_CALL_CTX_ENTRY	BIT(9)
+
 /* Each call __bpf_prog_enter + call bpf_func + call __bpf_prog_exit is ~50
  * bytes on x86.
  */
@@ -1295,6 +1298,7 @@ struct bpf_attach_target_info {
 	struct module *tgt_mod;
 	const char *tgt_name;
 	const struct btf_type *tgt_type;
+	int subprog;
 };
 
 #define BPF_DISPATCHER_MAX 48 /* Fits in 2048B */
@@ -1327,9 +1331,10 @@ struct bpf_dispatcher {
 static __always_inline __bpfcall unsigned int bpf_dispatcher_nop_func(
 	const void *ctx,
 	const struct bpf_insn *insnsi,
+	const u32 *tcc,
 	bpf_func_t bpf_func)
 {
-	return bpf_func(ctx, insnsi);
+	return bpf_func(ctx, insnsi, tcc);
 }
 
 /* the implementation of the opaque uapi struct bpf_dynptr */
@@ -1407,7 +1412,7 @@ int arch_prepare_bpf_dispatcher(void *image, void *buf, s64 *funcs, int num_func
 	DEFINE_STATIC_CALL(bpf_dispatcher_##name##_call, bpf_dispatcher_nop_func)
 
 #define __BPF_DISPATCHER_CALL(name)				\
-	static_call(bpf_dispatcher_##name##_call)(ctx, insnsi, bpf_func)
+	static_call(bpf_dispatcher_##name##_call)(ctx, insnsi, tcc, bpf_func)
 
 #define __BPF_DISPATCHER_UPDATE(_d, _new)			\
 	__static_call_update((_d)->sc_key, (_d)->sc_tramp, (_new))
@@ -1415,7 +1420,7 @@ int arch_prepare_bpf_dispatcher(void *image, void *buf, s64 *funcs, int num_func
 #else
 #define __BPF_DISPATCHER_SC_INIT(name)
 #define __BPF_DISPATCHER_SC(name)
-#define __BPF_DISPATCHER_CALL(name)		bpf_func(ctx, insnsi)
+#define __BPF_DISPATCHER_CALL(name)		bpf_func(ctx, insnsi, tcc)
 #define __BPF_DISPATCHER_UPDATE(_d, _new)
 #endif
 
@@ -1438,6 +1443,7 @@ int arch_prepare_bpf_dispatcher(void *image, void *buf, s64 *funcs, int num_func
 	noinline __bpfcall unsigned int bpf_dispatcher_##name##_func(	\
 		const void *ctx,					\
 		const struct bpf_insn *insnsi,				\
+		const u32 *tcc,						\
 		bpf_func_t bpf_func)					\
 	{								\
 		return __BPF_DISPATCHER_CALL(name);			\
@@ -1450,6 +1456,7 @@ int arch_prepare_bpf_dispatcher(void *image, void *buf, s64 *funcs, int num_func
 	unsigned int bpf_dispatcher_##name##_func(			\
 		const void *ctx,					\
 		const struct bpf_insn *insnsi,				\
+		const u32 *tcc,						\
 		bpf_func_t bpf_func);					\
 	extern struct bpf_dispatcher bpf_dispatcher_##name;
 
@@ -1714,8 +1721,7 @@ struct bpf_prog {
 	u8			tag[BPF_TAG_SIZE];
 	struct bpf_prog_stats __percpu *stats;
 	int __percpu		*active;
-	unsigned int		(*bpf_func)(const void *ctx,
-					    const struct bpf_insn *insn);
+	bpf_func_t		bpf_func;
 	struct bpf_prog_aux	*aux;		/* Auxiliary fields */
 	struct sock_fprog_kern	*orig_prog;	/* Original BPF program */
 	/* Instructions for interpreter */
@@ -2241,6 +2247,7 @@ struct bpf_tramp_run_ctx {
 	struct bpf_run_ctx run_ctx;
 	u64 bpf_cookie;
 	struct bpf_run_ctx *saved_run_ctx;
+	u32 tail_call_cnt;
 };
 
 static inline struct bpf_run_ctx *bpf_set_run_ctx(struct bpf_run_ctx *new_ctx)

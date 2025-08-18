@@ -18,8 +18,7 @@
  * following signature:
  *
  * unsigned int trampoline(const void *ctx, const struct bpf_insn *insnsi,
- *                         unsigned int (*bpf_func)(const void *,
- *                                                  const struct bpf_insn *));
+ *                         const u32 *tcc, bpf_func_t bpf_func);
  */
 
 static struct bpf_dispatcher_prog *bpf_dispatcher_find_prog(
