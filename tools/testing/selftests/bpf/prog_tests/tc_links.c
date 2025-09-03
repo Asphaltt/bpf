@@ -8,6 +8,7 @@
 #define loopback 1
 #define ping_cmd "ping -q -c1 -w1 127.0.0.1 > /dev/null"
 
+#include "tcx_interrupt.skel.h"
 #include "test_tc_link.skel.h"
 
 #include "netlink_helpers.h"
@@ -1959,4 +1960,44 @@ void test_ns_tc_links_dev_mixed(void)
 {
 	test_tc_links_dev_mixed(BPF_TCX_INGRESS);
 	test_tc_links_dev_mixed(BPF_TCX_EGRESS);
+}
+
+#define PREEMPT_BITS    8
+#define SOFTIRQ_BITS    8
+
+#define PREEMPT_SHIFT   0
+#define SOFTIRQ_SHIFT   (PREEMPT_SHIFT + PREEMPT_BITS)
+
+#define __IRQ_MASK(x)   ((1UL << (x))-1)
+
+#define SOFTIRQ_MASK    (__IRQ_MASK(SOFTIRQ_BITS) << SOFTIRQ_SHIFT)
+
+void test_tcx_interrupt_cnt(void)
+{
+	LIBBPF_OPTS(bpf_tcx_opts, opts);
+	struct tcx_interrupt *skel;
+	struct bpf_link *link;
+
+	skel = tcx_interrupt__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "tcx_interrupt__open_and_load"))
+		return;
+
+	link = bpf_program__attach_tcx(skel->progs.tc_igr, 4, &opts);
+	if (!ASSERT_OK_PTR(link, "bpf_program__attach_tcx igr"))
+		goto out;
+	skel->links.tc_igr = link;
+
+	link = bpf_program__attach_tcx(skel->progs.tc_egr, 4, &opts);
+	if (!ASSERT_OK_PTR(link, "bpf_program__attach_tcx egr"))
+		goto out;
+	skel->links.tc_egr = link;
+
+	//ASSERT_OK(system(ping_cmd), ping_cmd);
+	printf("wait for ping");
+	sleep(10);
+
+	ASSERT_NEQ(skel->bss->interrupt_igr, 0, "interrupt_igr");
+	ASSERT_EQ(skel->bss->interrupt_egr, 0, "interrupt_egr");
+out:
+	tcx_interrupt__destroy(skel);
 }
