@@ -1,0 +1,52 @@
+From 39d542c339744654475489e9823bfa89beb51d4e Mon Sep 17 00:00:00 2001
+From: Leon Hwang <leon.hwang@linux.dev>
+Date: Wed, 3 Sep 2025 11:58:21 +0800
+Subject: [PATCH bpf-next v3 0/2] selftests/bpf: Introduce experimental
+ bpf_in_interrupt()
+
+Filtering pid_tgid is meanlingless when the current task is preempted by
+an interrupt.
+
+To address this, introduce 'bpf_in_interrupt()' helper function, which
+allows BPF programs to determine whether they are executing in interrupt
+context.
+
+'get_preempt_count()':
+
+* On x86, '*(int *) bpf_this_cpu_ptr(&__preempt_count)'.
+* On arm64, 'bpf_get_current_task_btf()->thread_info.preempt.count'.
+
+Then 'bpf_in_interrupt()' will be:
+
+* If !PREEMPT_RT, 'get_preempt_count() & (NMI_MASK | HARDIRQ_MASK
+  | SOFTIRQ_MASK)'.
+* If PREEMPT_RT, '(get_preempt_count() & (NMI_MASK | HARDIRQ_MASK))
+  | (bpf_get_current_task_btf()->softirq_disable_cnt & SOFTIRQ_MASK)'.
+
+'bpf_in_interrupt()' runs well when PREEMPT_RT is enabled. But it's
+difficult for me to test it well because I'm not familiar with
+PREEMPT_RT.
+
+Changes:
+v2 -> v3:
+* Address comments from Alexei:
+  * Move bpf_in_interrupt() to bpf_experimental.h.
+  * Add support for arm64.
+v2: https://lore.kernel.org/bpf/20250825131502.54269-1-leon.hwang@linux.dev/
+
+v1 -> v2:
+* Fix a build error reported by test bot.
+
+Leon Hwang (2):
+  selftests/bpf: Introduce experimental bpf_in_interrupt()
+  selftests/bpf: Add case to test bpf_in_interrupt()
+
+ .../testing/selftests/bpf/bpf_experimental.h  | 54 +++++++++++++++++++
+ .../testing/selftests/bpf/prog_tests/timer.c  | 30 +++++++++++
+ .../selftests/bpf/progs/timer_interrupt.c     | 48 +++++++++++++++++
+ 3 files changed, 132 insertions(+)
+ create mode 100644 tools/testing/selftests/bpf/progs/timer_interrupt.c
+
+--
+2.51.0
+

@@ -1,0 +1,122 @@
+From 39d542c339744654475489e9823bfa89beb51d4e Mon Sep 17 00:00:00 2001
+From: Leon Hwang <leon.hwang@linux.dev>
+Date: Tue, 2 Sep 2025 10:00:30 +0800
+Subject: [PATCH bpf-next v3 2/2] selftests/bpf: Add case to test
+ bpf_in_interrupt()
+
+Add a timer test case to test 'bpf_in_interrupt()'.
+
+cd tools/testing/selftests/bpf
+./test_progs -t timer_interrupt
+462     timer_interrupt:OK
+Summary: 1/0 PASSED, 0 SKIPPED, 0 FAILED
+
+Signed-off-by: Leon Hwang <leon.hwang@linux.dev>
+---
+ .../testing/selftests/bpf/prog_tests/timer.c  | 30 ++++++++++++
+ .../selftests/bpf/progs/timer_interrupt.c     | 48 +++++++++++++++++++
+ 2 files changed, 78 insertions(+)
+ create mode 100644 tools/testing/selftests/bpf/progs/timer_interrupt.c
+
+diff --git a/tools/testing/selftests/bpf/prog_tests/timer.c b/tools/testing/selftests/bpf/prog_tests/timer.c
+index d66687f1ee6a..049efb5e7823 100644
+--- a/tools/testing/selftests/bpf/prog_tests/timer.c
++++ b/tools/testing/selftests/bpf/prog_tests/timer.c
+@@ -3,6 +3,7 @@
+ #include <test_progs.h>
+ #include "timer.skel.h"
+ #include "timer_failure.skel.h"
++#include "timer_interrupt.skel.h"
+
+ #define NUM_THR 8
+
+@@ -95,3 +96,32 @@ void serial_test_timer(void)
+
+ 	RUN_TESTS(timer_failure);
+ }
++
++void test_timer_interrupt(void)
++{
++	struct timer_interrupt *skel = NULL;
++	int err, prog_fd;
++	LIBBPF_OPTS(bpf_test_run_opts, opts);
++
++	skel = timer_interrupt__open_and_load();
++	if (!ASSERT_OK_PTR(skel, "timer_interrupt__open_and_load"))
++		return;
++
++	err = timer_interrupt__attach(skel);
++	if (!ASSERT_OK(err, "timer_interrupt__attach"))
++		goto out;
++
++	prog_fd = bpf_program__fd(skel->progs.test_timer_interrupt);
++	err = bpf_prog_test_run_opts(prog_fd, &opts);
++	if (!ASSERT_OK(err, "bpf_prog_test_run_opts"))
++		goto out;
++
++	usleep(50);
++
++	ASSERT_EQ(skel->bss->in_interrupt, 0, "in_interrupt");
++	if (skel->bss->preempt_count)
++		ASSERT_NEQ(skel->bss->in_interrupt_cb, 0, "in_interrupt_cb");
++
++out:
++	timer_interrupt__destroy(skel);
++}
+diff --git a/tools/testing/selftests/bpf/progs/timer_interrupt.c b/tools/testing/selftests/bpf/progs/timer_interrupt.c
+new file mode 100644
+index 000000000000..19180a455f40
+--- /dev/null
++++ b/tools/testing/selftests/bpf/progs/timer_interrupt.c
+@@ -0,0 +1,48 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <vmlinux.h>
++#include <bpf/bpf_helpers.h>
++#include <bpf/bpf_tracing.h>
++#include "bpf_experimental.h"
++
++char _license[] SEC("license") = "GPL";
++
++#define CLOCK_MONOTONIC		1
++
++int preempt_count;
++int in_interrupt;
++int in_interrupt_cb;
++
++struct elem {
++	struct bpf_timer t;
++};
++
++struct {
++	__uint(type, BPF_MAP_TYPE_ARRAY);
++	__uint(max_entries, 1);
++	__type(key, int);
++	__type(value, struct elem);
++} array SEC(".maps");
++
++static int timer_in_interrupt(void *map, int *key, struct bpf_timer *timer)
++{
++	preempt_count = get_preempt_count();
++	in_interrupt_cb = bpf_in_interrupt();
++	return 0;
++}
++
++SEC("fentry/bpf_fentry_test1")
++int BPF_PROG(test_timer_interrupt)
++{
++	struct bpf_timer *timer;
++	int key = 0;
++
++	timer = bpf_map_lookup_elem(&array, &key);
++	if (!timer)
++		return 0;
++
++	in_interrupt = bpf_in_interrupt();
++	bpf_timer_init(timer, &array, CLOCK_MONOTONIC);
++	bpf_timer_set_callback(timer, timer_in_interrupt);
++	bpf_timer_start(timer, 0, 0);
++	return 0;
++}
+--
+2.51.0
+
