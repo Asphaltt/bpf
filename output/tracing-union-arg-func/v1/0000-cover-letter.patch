@@ -1,0 +1,31 @@
+From 6112519bed472d17b02d6595683765acc78e6968 Mon Sep 17 00:00:00 2001
+From: Leon Hwang <leon.hwang@linux.dev>
+Date: Fri, 5 Sep 2025 21:12:14 +0800
+Subject: [PATCH bpf-next 0/2] bpf: Support fentry/fexit for functions
+ with union args
+
+While tracing 'release_pages' with bpfsnoop[0], the verifier reports:
+
+The function release_pages arg0 type UNION is unsupported.
+
+However, it should be acceptable to trace functions that have 'union'
+arguments.
+
+This patch set enables such support in the verifier by allowing 'union'
+as a valid argument type.
+
+Links:
+[0] https://github.com/bpfsnoop/bpfsnoop
+
+Leon Hwang (2):
+  bpf: Allow tracing union-arg functions
+  selftests/bpf: Add test to access union argument in tracing program
+
+ kernel/bpf/btf.c                                   |  4 ++--
+ net/bpf/test_run.c                                 | 14 +++++++++++++-
+ .../selftests/bpf/progs/verifier_btf_ctx_access.c  | 12 ++++++++++++
+ 3 files changed, 27 insertions(+), 3 deletions(-)
+
+--
+2.50.1
+
