@@ -1222,6 +1222,10 @@ struct bpf_tramp_branch_entries {
 
 DECLARE_PER_CPU(struct bpf_tramp_branch_entries, bpf_branch_snapshot);
 
+enum {
+	BPF_LBR_F_COPY	= 1,	/* Copy branch snapshot from bpf_branch_snapshot. */
+};
+
 /* Different use cases for BPF trampoline:
  * 1. replace nop at the function entry (kprobe equivalent)
  *    flags = BPF_TRAMP_F_RESTORE_REGS
