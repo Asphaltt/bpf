@@ -392,6 +392,7 @@ static int ftrace_rec_update_ops(struct dyn_ftrace *rec) { return 0; }
  */
 int ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
 {
+	enum aarch64_insn_branch_type btype;
 	unsigned long pc = rec->ip;
 	u32 old, new;
 	int ret;
@@ -404,7 +405,13 @@ int ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
 		return -EINVAL;
 
 	old = aarch64_insn_gen_nop();
-	new = aarch64_insn_gen_branch_imm(pc, addr, AARCH64_INSN_BRANCH_LINK);
+	if (ftrace_is_jmp(addr)) {
+		addr = ftrace_jmp_get(addr);
+		btype = AARCH64_INSN_BRANCH_NOLINK;
+	} else {
+		btype = AARCH64_INSN_BRANCH_LINK;
+	}
+	new = aarch64_insn_gen_branch_imm(pc, addr, btype);
 
 	return ftrace_modify_code(pc, old, new, true);
 }
@@ -413,6 +420,7 @@ int ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
 int ftrace_modify_call(struct dyn_ftrace *rec, unsigned long old_addr,
 		       unsigned long addr)
 {
+	enum aarch64_insn_branch_type btype;
 	unsigned long pc = rec->ip;
 	u32 old, new;
 	int ret;
@@ -426,9 +434,20 @@ int ftrace_modify_call(struct dyn_ftrace *rec, unsigned long old_addr,
 	if (!ftrace_find_callable_addr(rec, NULL, &addr))
 		return -EINVAL;
 
-	old = aarch64_insn_gen_branch_imm(pc, old_addr,
-					  AARCH64_INSN_BRANCH_LINK);
-	new = aarch64_insn_gen_branch_imm(pc, addr, AARCH64_INSN_BRANCH_LINK);
+	if (ftrace_is_jmp(addr)) {
+		old_addr = ftrace_jmp_get(old_addr);
+		btype = AARCH64_INSN_BRANCH_NOLINK;
+	} else {
+		btype = AARCH64_INSN_BRANCH_LINK;
+	}
+	old = aarch64_insn_gen_branch_imm(pc, old_addr, btype);
+	if (ftrace_is_jmp(addr)) {
+		addr = ftrace_jmp_get(addr);
+		btype = AARCH64_INSN_BRANCH_NOLINK;
+	} else {
+		btype = AARCH64_INSN_BRANCH_LINK;
+	}
+	new = aarch64_insn_gen_branch_imm(pc, addr, btype);
 
 	return ftrace_modify_code(pc, old, new, true);
 }
