@@ -847,26 +847,30 @@ static void build_epilogue(struct jit_ctx *ctx)
 	emit(RESTORE | RS1(bpf2sparc[BPF_REG_0]) | RS2(G0) | RD(O0), ctx);
 }
 
-static void emit_tail_call(struct jit_ctx *ctx)
+static void emit_tail_call(struct jit_ctx *ctx, u32 map_index)
 {
+	struct bpf_map *map = ctx->prog->aux->used_maps[map_index];
 	const u8 bpf_array = bpf2sparc[BPF_REG_2];
 	const u8 bpf_index = bpf2sparc[BPF_REG_3];
+	const u8 tmp2 = bpf2sparc[TMP_REG_2];
 	const u8 tmp = bpf2sparc[TMP_REG_1];
 	u32 off;
 
 	ctx->saw_tail_call = true;
+	ctx->tmp_1_used = true;
+	ctx->tmp_2_used = true;
 
-	off = offsetof(struct bpf_array, map.max_entries);
-	emit(LD32 | IMMED | RS1(bpf_array) | S13(off) | RD(tmp), ctx);
+	/* if (index >= map->max_entries) goto out; */
+	emit_set_const(map->max_entries, tmp, ctx);
 	emit_cmp(bpf_index, tmp, ctx);
-#define OFFSET1 17
+#define OFFSET1 18
 	emit_branch(BGEU, ctx->idx, ctx->idx + OFFSET1, ctx);
 	emit_nop(ctx);
 
 	off = BPF_TAILCALL_CNT_SP_OFF;
 	emit(LD32 | IMMED | RS1(SP) | S13(off) | RD(tmp), ctx);
 	emit_cmpi(tmp, MAX_TAIL_CALL_CNT, ctx);
-#define OFFSET2 13
+#define OFFSET2 14
 	emit_branch(BGEU, ctx->idx, ctx->idx + OFFSET2, ctx);
 	emit_nop(ctx);
 
@@ -874,22 +878,26 @@ static void emit_tail_call(struct jit_ctx *ctx)
 	off = BPF_TAILCALL_CNT_SP_OFF;
 	emit(ST32 | IMMED | RS1(SP) | S13(off) | RD(tmp), ctx);
 
+	/* tgt = array->ptrs[max_entries + index]; */
 	emit_alu3_K(SLL, bpf_index, 3, tmp, ctx);
 	emit_alu(ADD, bpf_array, tmp, ctx);
-	off = offsetof(struct bpf_array, ptrs);
-	emit(LD64 | IMMED | RS1(tmp) | S13(off) | RD(tmp), ctx);
+	off = offsetof(struct bpf_array, ptrs) + map->max_entries * sizeof(void *);
+	emit_set_const(off, tmp2, ctx);
+	emit(LD64 | RS1(tmp) | RS2(tmp2) | RD(tmp), ctx);
 
 	emit_cmpi(tmp, 0, ctx);
-#define OFFSET3 5
+#define OFFSET3 4
 	emit_branch(BE, ctx->idx, ctx->idx + OFFSET3, ctx);
 	emit_nop(ctx);
 
-	off = offsetof(struct bpf_prog, bpf_func);
-	emit(LD64 | IMMED | RS1(tmp) | S13(off) | RD(tmp), ctx);
-
-	off = BPF_TAILCALL_PROLOGUE_SKIP;
-	emit(JMPL | IMMED | RS1(tmp) | S13(off) | RD(G0), ctx);
+	/* goto *tgt; */
+	emit(JMPL | IMMED | RS1(tmp) | S13(0) | RD(G0), ctx);
 	emit_nop(ctx);
+}
+
+int bpf_arch_tail_call_prologue_offset(void)
+{
+	return BPF_TAILCALL_PROLOGUE_SKIP;
 }
 
 static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx)
@@ -1226,7 +1234,7 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx)
 
 	/* tail call */
 	case BPF_JMP | BPF_TAIL_CALL:
-		emit_tail_call(ctx);
+		emit_tail_call(ctx, imm);
 		break;
 
 	/* function return */
