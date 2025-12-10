@@ -319,8 +319,10 @@ int bpf_jit_emit_func_call_rel(u32 *image, u32 *fimage, struct codegen_context *
 	return 0;
 }
 
-static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 out)
+static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx,
+				  u32 out, struct bpf_prog *fp, u32 map_index)
 {
+	struct bpf_map *map = fp->aux->used_maps[map_index];
 	/*
 	 * By now, the eBPF program has already setup parameters in r3, r4 and r5
 	 * r3/BPF_REG_1 - pointer to ctx -- passed as is to the next bpf program
@@ -329,16 +331,13 @@ static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 o
 	 */
 	int b2p_bpf_array = bpf_to_ppc(BPF_REG_2);
 	int b2p_index = bpf_to_ppc(BPF_REG_3);
-	int bpf_tailcall_prologue_size = 12;
-
-	if (!IS_ENABLED(CONFIG_PPC_KERNEL_PCREL) && IS_ENABLED(CONFIG_PPC64_ELF_ABI_V2))
-		bpf_tailcall_prologue_size += 4; /* skip past the toc load */
+	u32 off;
 
 	/*
-	 * if (index >= array->map.max_entries)
+	 * if (index >= map->max_entries)
 	 *   goto out;
 	 */
-	EMIT(PPC_RAW_LWZ(bpf_to_ppc(TMP_REG_1), b2p_bpf_array, offsetof(struct bpf_array, map.max_entries)));
+	PPC_LI32(bpf_to_ppc(TMP_REG_1), map->max_entries);
 	EMIT(PPC_RAW_RLWINM(b2p_index, b2p_index, 0, 0, 31));
 	EMIT(PPC_RAW_CMPLW(b2p_index, bpf_to_ppc(TMP_REG_1)));
 	PPC_BCC_SHORT(COND_GE, out);
@@ -357,22 +356,21 @@ static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 o
 	EMIT(PPC_RAW_ADDI(bpf_to_ppc(TMP_REG_1), bpf_to_ppc(TMP_REG_1), 1));
 	EMIT(PPC_RAW_STD(bpf_to_ppc(TMP_REG_1), _R1, bpf_jit_stack_tailcallcnt(ctx)));
 
-	/* prog = array->ptrs[index]; */
+	/* tgt = array->ptrs[max_entries + index]; */
 	EMIT(PPC_RAW_MULI(bpf_to_ppc(TMP_REG_1), b2p_index, 8));
 	EMIT(PPC_RAW_ADD(bpf_to_ppc(TMP_REG_1), bpf_to_ppc(TMP_REG_1), b2p_bpf_array));
-	EMIT(PPC_RAW_LD(bpf_to_ppc(TMP_REG_1), bpf_to_ppc(TMP_REG_1), offsetof(struct bpf_array, ptrs)));
+	off = offsetof(struct bpf_array, ptrs) + map->max_entries * sizeof(void *);
+	PPC_LI32(bpf_to_ppc(TMP_REG_2), off);
+	EMIT(PPC_RAW_LDX(bpf_to_ppc(TMP_REG_1), bpf_to_ppc(TMP_REG_1), bpf_to_ppc(TMP_REG_2)));
 
 	/*
-	 * if (prog == NULL)
+	 * if (tgt == NULL)
 	 *   goto out;
 	 */
 	EMIT(PPC_RAW_CMPLDI(bpf_to_ppc(TMP_REG_1), 0));
 	PPC_BCC_SHORT(COND_EQ, out);
 
-	/* goto *(prog->bpf_func + prologue_size); */
-	EMIT(PPC_RAW_LD(bpf_to_ppc(TMP_REG_1), bpf_to_ppc(TMP_REG_1), offsetof(struct bpf_prog, bpf_func)));
-	EMIT(PPC_RAW_ADDI(bpf_to_ppc(TMP_REG_1), bpf_to_ppc(TMP_REG_1),
-			FUNCTION_DESCR_SIZE + bpf_tailcall_prologue_size));
+	/* goto *tgt; */
 	EMIT(PPC_RAW_MTCTR(bpf_to_ppc(TMP_REG_1)));
 
 	/* tear down stack, restore NVRs, ... */
@@ -382,6 +380,16 @@ static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 o
 
 	/* out: */
 	return 0;
+}
+
+int bpf_arch_tail_call_prologue_offset(void)
+{
+	int prologue_size = 12;
+
+	if (!IS_ENABLED(CONFIG_PPC_KERNEL_PCREL) && IS_ENABLED(CONFIG_PPC64_ELF_ABI_V2))
+		prologue_size += 4; /* skip past the toc load */
+
+	return FUNCTION_DESCR_SIZE + prologue_size;
 }
 
 bool bpf_jit_bypass_spec_v1(void)
@@ -1606,7 +1614,7 @@ cond_branch:
 		 */
 		case BPF_JMP | BPF_TAIL_CALL:
 			ctx->seen |= SEEN_TAILCALL;
-			ret = bpf_jit_emit_tail_call(image, ctx, addrs[i + 1]);
+			ret = bpf_jit_emit_tail_call(image, ctx, addrs[i + 1], fp, imm);
 			if (ret < 0)
 				return ret;
 			break;
