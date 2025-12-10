@@ -46,7 +46,6 @@ struct bpf_jit {
 	int lit64;		/* Current position in 64-bit literal pool */
 	int base_ip;		/* Base address for literal pool */
 	int exit_ip;		/* Address of exit */
-	int tail_call_start;	/* Tail call start offset */
 	int excnt;		/* Number of exception table entries */
 	int prologue_plt_ret;	/* Return address for prologue hotpatch PLT */
 	int prologue_plt;	/* Start of prologue hotpatch PLT */
@@ -59,6 +58,9 @@ struct bpf_jit {
 #define SEEN_LITERAL	BIT(1)		/* code uses literals */
 #define SEEN_FUNC	BIT(2)		/* calls C functions */
 #define SEEN_STACK	(SEEN_FUNC | SEEN_MEM)
+
+/* Prologue offset: 6 bytes brcl and 6 bytes xc/nops */
+#define S390_TAIL_CALL_OFFSET	12
 
 #define NVREGS		0xffc0		/* %r6-%r15 */
 
@@ -609,13 +611,10 @@ static void bpf_jit_prologue(struct bpf_jit *jit, struct bpf_prog *fp)
 	} else {
 		/*
 		 * Skip the tail call counter initialization in subprograms.
-		 * Insert nops in order to have tail_call_start at a
-		 * predictable offset.
+		 * Insert nops in order to have prologue at a predictable size.
 		 */
 		bpf_skip(jit, 6);
 	}
-	/* Tail calls have to skip above initialization */
-	jit->tail_call_start = jit->prg;
 	if (fp->aux->exception_cb) {
 		/*
 		 * Switch stack, the new address is in the 2nd parameter.
@@ -691,6 +690,11 @@ static void bpf_jit_epilogue(struct bpf_jit *jit)
 		bpf_jit_plt((struct bpf_plt *)(jit->prg_buf + jit->prg),
 			    jit->prg_buf + jit->prologue_plt_ret, NULL);
 	jit->prg += sizeof(struct bpf_plt);
+}
+
+int bpf_arch_tail_call_prologue_offset(void)
+{
+	return S390_TAIL_CALL_OFFSET;
 }
 
 bool ex_handler_bpf(const struct exception_table_entry *x, struct pt_regs *regs)
@@ -1840,6 +1844,7 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 		break;
 	}
 	case BPF_JMP | BPF_TAIL_CALL: {
+		struct bpf_map *map = fp->aux->used_maps[imm];
 		int patch_1_clrj, patch_2_clij, patch_3_brc;
 
 		/*
@@ -1848,13 +1853,12 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 		 *  B2: pointer to bpf_array
 		 *  B3: index in bpf_array
 		 *
-		 * if (index >= array->map.max_entries)
+		 * if (index >= map->max_entries)
 		 *         goto out;
 		 */
 
-		/* llgf %w1,map.max_entries(%b2) */
-		EMIT6_DISP_LH(0xe3000000, 0x0016, REG_W1, REG_0, BPF_REG_2,
-			      offsetof(struct bpf_array, map.max_entries));
+		/* llilf %w1,map->max_entries */
+		EMIT6_IMM(0xc00f0000, REG_W1, map->max_entries);
 		/* if ((u32)%b3 >= (u32)%w1) goto out; */
 		/* clrj %b3,%w1,0xa,out */
 		patch_1_clrj = jit->prg;
@@ -1878,8 +1882,8 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 				 2, jit->prg);
 
 		/*
-		 * prog = array->ptrs[index];
-		 * if (prog == NULL)
+		 * tgt = array->ptrs[max_entries + index];
+		 * if (tgt == NULL)
 		 *         goto out;
 		 */
 
@@ -1887,9 +1891,9 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 		EMIT4(0xb9160000, REG_1, BPF_REG_3);
 		/* sllg %r1,%r1,3: %r1 *= 8 */
 		EMIT6_DISP_LH(0xeb000000, 0x000d, REG_1, REG_1, REG_0, 3);
-		/* ltg %r1,prog(%b2,%r1) */
-		EMIT6_DISP_LH(0xe3000000, 0x0002, REG_1, BPF_REG_2,
-			      REG_1, offsetof(struct bpf_array, ptrs));
+		off = offsetof(struct bpf_array, ptrs) + map->max_entries * sizeof(void *);
+		/* ltg %r1,tgt(%b2,%r1) */
+		EMIT6_DISP_LH(0xe3000000, 0x0002, REG_1, BPF_REG_2, REG_1, off);
 		/* brc 0x8,out */
 		patch_3_brc = jit->prg;
 		EMIT4_PCREL_RIC(0xa7040000, 8, jit->prg);
@@ -1900,22 +1904,17 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 		save_restore_regs(jit, REGS_RESTORE, 0);
 
 		/*
-		 * goto *(prog->bpf_func + tail_call_start);
+		 * goto *tgt;
 		 */
 
-		/* lg %r1,bpf_func(%r1) */
-		EMIT6_DISP_LH(0xe3000000, 0x0004, REG_1, REG_1, REG_0,
-			      offsetof(struct bpf_prog, bpf_func));
 		if (nospec_uses_trampoline()) {
 			jit->seen |= SEEN_FUNC;
-			/* aghi %r1,tail_call_start */
-			EMIT4_IMM(0xa70b0000, REG_1, jit->tail_call_start);
 			/* brcl 0xf,__s390_indirect_jump_r1 */
 			EMIT6_PCREL_RILC_PTR(0xc0040000, 0xf,
 					     __s390_indirect_jump_r1);
 		} else {
-			/* bc 0xf,tail_call_start(%r1) */
-			_EMIT4(0x47f01000 + jit->tail_call_start);
+			/* bc 0xf,0(%r1) */
+			_EMIT4(0x47f01000);
 		}
 		/* out: */
 		if (jit->prg_buf) {
