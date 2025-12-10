@@ -132,6 +132,18 @@ enum {
 
 #define FLAG_IMM_OVERFLOW	(1 << 0)
 
+#ifdef CONFIG_FRAME_POINTER
+#define ARM32_PROLOGUE_INSN_NR 10
+#else
+#define ARM32_PROLOGUE_INSN_NR 9
+#endif
+
+/*
+ * ARM32 tail call offset in bytes from the start of BPF program.
+ * This is the offset to skip the prologue when doing a tail call.
+ */
+#define ARM32_TAIL_CALL_OFFSET	(ARM32_PROLOGUE_INSN_NR * 4)
+
 /*
  * Map eBPF registers to ARM 32bit registers or stack scratch space.
  *
@@ -1390,10 +1402,10 @@ static inline void emit_ar_r(const u8 rd, const u8 rt, const u8 rm,
 }
 
 static int out_offset = -1; /* initialized on the first pass of build_body() */
-static int emit_bpf_tail_call(struct jit_ctx *ctx)
+static int emit_bpf_tail_call(struct jit_ctx *ctx, u32 map_index)
 {
-
 	/* bpf_tail_call(void *prog_ctx, struct bpf_array *array, u64 index) */
+	struct bpf_map *map = ctx->prog->aux->used_maps[map_index];
 	const s8 *r2 = bpf2a32[BPF_REG_2];
 	const s8 *r3 = bpf2a32[BPF_REG_3];
 	const s8 *tmp = bpf2a32[TMP_REG_1];
@@ -1407,18 +1419,15 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx)
 	s8 r_array, r_index;
 	int off;
 
-	/* if (index >= array->map.max_entries)
+	/* if (index >= map->max_entries)
 	 *	goto out;
 	 */
-	BUILD_BUG_ON(offsetof(struct bpf_array, map.max_entries) >
-		     ARM_INST_LDST__IMM12);
-	off = offsetof(struct bpf_array, map.max_entries);
 	r_array = arm_bpf_get_reg32(r2[1], tmp2[0], ctx);
 	/* index is 32-bit for arrays */
 	r_index = arm_bpf_get_reg32(r3[1], tmp2[1], ctx);
-	/* array->map.max_entries */
-	emit(ARM_LDR_I(tmp[1], r_array, off), ctx);
-	/* index >= array->map.max_entries */
+	/* map->max_entries (jit-time constant) */
+	emit_mov_i(tmp[1], map->max_entries, ctx);
+	/* index >= map->max_entries */
 	emit(ARM_CMP_R(r_index, tmp[1]), ctx);
 	_emit(ARM_COND_CS, ARM_B(jmp_offset), ctx);
 
@@ -1439,23 +1448,18 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx)
 	emit(ARM_ADC_I(tc[0], tc[0], 0), ctx);
 	arm_bpf_put_reg64(tcc, tmp, ctx);
 
-	/* prog = array->ptrs[index]
-	 * if (prog == NULL)
+	/* tgt = array->ptrs[max_entries + index]
+	 * if (tgt == 0)
 	 *	goto out;
 	 */
-	BUILD_BUG_ON(imm8m(offsetof(struct bpf_array, ptrs)) < 0);
-	off = imm8m(offsetof(struct bpf_array, ptrs));
-	emit(ARM_ADD_I(tmp[1], r_array, off), ctx);
+	off = offsetof(struct bpf_array, ptrs) + map->max_entries * sizeof(void *);
+	emit_mov_i(tmp[0], off, ctx);
+	emit(ARM_ADD_R(tmp[1], r_array, tmp[0]), ctx);
 	emit(ARM_LDR_R_SI(tmp[1], tmp[1], r_index, SRTYPE_ASL, 2), ctx);
 	emit(ARM_CMP_I(tmp[1], 0), ctx);
 	_emit(ARM_COND_EQ, ARM_B(jmp_offset), ctx);
 
-	/* goto *(prog->bpf_func + prologue_size); */
-	BUILD_BUG_ON(offsetof(struct bpf_prog, bpf_func) >
-		     ARM_INST_LDST__IMM12);
-	off = offsetof(struct bpf_prog, bpf_func);
-	emit(ARM_LDR_I(tmp[1], tmp[1], off), ctx);
-	emit(ARM_ADD_I(tmp[1], tmp[1], ctx->prologue_bytes), ctx);
+	/* goto *tgt; */
 	emit_bx_r(tmp[1], ctx);
 
 	/* out: */
@@ -1469,6 +1473,11 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx)
 	return 0;
 #undef cur_offset
 #undef jmp_offset
+}
+
+int bpf_arch_tail_call_prologue_offset(void)
+{
+	return ARM32_TAIL_CALL_OFFSET;
 }
 
 /* 0xabcd => 0xcdab */
@@ -2041,7 +2050,7 @@ go_jmp:
 	}
 	/* tail call */
 	case BPF_JMP | BPF_TAIL_CALL:
-		if (emit_bpf_tail_call(ctx))
+		if (emit_bpf_tail_call(ctx, imm))
 			return -EFAULT;
 		break;
 	/* function call */
