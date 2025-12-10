@@ -223,8 +223,10 @@ int bpf_jit_emit_func_call_rel(u32 *image, u32 *fimage, struct codegen_context *
 	return 0;
 }
 
-static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 out)
+static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx,
+				  u32 out, struct bpf_prog *fp, u32 map_index)
 {
+	struct bpf_map *map = fp->aux->used_maps[map_index];
 	/*
 	 * By now, the eBPF program has already setup parameters in r3-r6
 	 * r3-r4/BPF_REG_1 - pointer to ctx -- passed as is to the next bpf program
@@ -233,12 +235,13 @@ static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 o
 	 */
 	int b2p_bpf_array = bpf_to_ppc(BPF_REG_2);
 	int b2p_index = bpf_to_ppc(BPF_REG_3);
+	u32 off;
 
 	/*
-	 * if (index >= array->map.max_entries)
+	 * if (index >= map->max_entries)
 	 *   goto out;
 	 */
-	EMIT(PPC_RAW_LWZ(_R0, b2p_bpf_array, offsetof(struct bpf_array, map.max_entries)));
+	PPC_LI32(_R0, map->max_entries);
 	EMIT(PPC_RAW_CMPLW(b2p_index, _R0));
 	EMIT(PPC_RAW_LWZ(_R0, _R1, bpf_jit_stack_offsetof(ctx, BPF_PPC_TC)));
 	PPC_BCC_SHORT(COND_GE, out);
@@ -252,21 +255,21 @@ static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 o
 	EMIT(PPC_RAW_ADDIC(_R0, _R0, 1));
 	PPC_BCC_SHORT(COND_GE, out);
 
-	/* prog = array->ptrs[index]; */
+	/* tgt = array->ptrs[max_entries + index]; */
 	EMIT(PPC_RAW_RLWINM(_R3, b2p_index, 2, 0, 29));
 	EMIT(PPC_RAW_ADD(_R3, _R3, b2p_bpf_array));
-	EMIT(PPC_RAW_LWZ(_R3, _R3, offsetof(struct bpf_array, ptrs)));
+	off = offsetof(struct bpf_array, ptrs) + map->max_entries * sizeof(u32);
+	PPC_LI32(_R5, off);
+	EMIT(PPC_RAW_LWZX(_R3, _R3, _R5));
 
 	/*
-	 * if (prog == NULL)
+	 * if (tgt == NULL)
 	 *   goto out;
 	 */
 	EMIT(PPC_RAW_CMPLWI(_R3, 0));
 	PPC_BCC_SHORT(COND_EQ, out);
 
-	/* goto *(prog->bpf_func + prologue_size); */
-	EMIT(PPC_RAW_LWZ(_R3, _R3, offsetof(struct bpf_prog, bpf_func)));
-	EMIT(PPC_RAW_ADDIC(_R3, _R3, BPF_TAILCALL_PROLOGUE_SIZE));
+	/* goto *tgt; */
 	EMIT(PPC_RAW_MTCTR(_R3));
 
 	EMIT(PPC_RAW_MR(_R3, bpf_to_ppc(BPF_REG_1)));
@@ -281,6 +284,11 @@ static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 o
 
 	/* out: */
 	return 0;
+}
+
+int bpf_arch_tail_call_prologue_offset(void)
+{
+	return BPF_TAILCALL_PROLOGUE_SIZE;
 }
 
 /* Assemble the body code between the prologue & epilogue */
@@ -1362,7 +1370,7 @@ cond_branch:
 		 */
 		case BPF_JMP | BPF_TAIL_CALL:
 			ctx->seen |= SEEN_TAILCALL;
-			ret = bpf_jit_emit_tail_call(image, ctx, addrs[i + 1]);
+			ret = bpf_jit_emit_tail_call(image, ctx, addrs[i + 1], fp, imm);
 			if (ret < 0)
 				return ret;
 			break;
