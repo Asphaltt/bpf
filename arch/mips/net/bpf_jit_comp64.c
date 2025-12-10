@@ -474,8 +474,9 @@ static int emit_call(struct jit_context *ctx, const struct bpf_insn *insn)
 }
 
 /* Function tail call */
-static int emit_tail_call(struct jit_context *ctx)
+static int emit_tail_call(struct jit_context *ctx, u32 map_index)
 {
+	struct bpf_map *map = ctx->program->aux->used_maps[map_index];
 	u8 ary = bpf2mips64[BPF_REG_2];
 	u8 ind = bpf2mips64[BPF_REG_3];
 	u8 tcc = bpf2mips64[JIT_REG_TC];
@@ -489,41 +490,36 @@ static int emit_tail_call(struct jit_context *ctx)
 	 * eBPF R3 - array index of function to be called
 	 */
 
-	/* if (ind >= ary->map.max_entries) goto out */
-	off = offsetof(struct bpf_array, map.max_entries);
-	if (off > 0x7fff)
-		return -1;
-	emit(ctx, lwu, tmp, off, ary);            /* tmp = ary->map.max_entrs*/
-	emit(ctx, sltu, tmp, ind, tmp);           /* tmp = ind < t1          */
+	/* if (ind >= map->max_entries) goto out */
+	emit_mov_i(ctx, tmp, map->max_entries);   /* tmp = max_entries       */
+	emit(ctx, sltu, tmp, ind, tmp);           /* tmp = ind < tmp         */
 	emit(ctx, beqz, tmp, get_offset(ctx, 1)); /* PC += off(1) if tmp == 0*/
 
 	/* if (--TCC < 0) goto out */
 	emit(ctx, daddiu, tcc, tcc, -1);          /* tcc-- (delay slot)      */
 	emit(ctx, bltz, tcc, get_offset(ctx, 1)); /* PC += off(1) if tcc < 0 */
 						  /* (next insn delay slot)  */
-	/* prog = ary->ptrs[ind] */
-	off = offsetof(struct bpf_array, ptrs);
-	if (off > 0x7fff)
-		return -1;
+	/* tgt = ary->ptrs[max_entries + ind] */
 	emit(ctx, dsll, tmp, ind, 3);             /* tmp = ind << 3          */
 	emit(ctx, daddu, tmp, tmp, ary);          /* tmp += ary              */
-	emit(ctx, ld, tmp, off, tmp);             /* tmp = *(tmp + off)      */
+	off = offsetof(struct bpf_array, ptrs) + map->max_entries * sizeof(void *);
+	emit_mov_i(ctx, MIPS_R_T5, off);          /* t5 = off                */
+	emit(ctx, daddu, tmp, tmp, MIPS_R_T5);    /* tmp += t5               */
+	emit(ctx, ld, tmp, 0, tmp);               /* tmp = *(tmp)            */
 
-	/* if (prog == 0) goto out */
+	/* if (tgt == 0) goto out */
 	emit(ctx, beqz, tmp, get_offset(ctx, 1)); /* PC += off(1) if tmp == 0*/
 	emit(ctx, nop);                           /* Delay slot              */
 
-	/* func = prog->bpf_func + 8 (prologue skip offset) */
-	off = offsetof(struct bpf_prog, bpf_func);
-	if (off > 0x7fff)
-		return -1;
-	emit(ctx, ld, tmp, off, tmp);                /* tmp = *(tmp + off)   */
-	emit(ctx, daddiu, tmp, tmp, JIT_TCALL_SKIP); /* tmp += skip (4)      */
-
-	/* goto func */
+	/* goto *tgt */
 	build_epilogue(ctx, tmp);
 	access_reg(ctx, JIT_REG_TC);
 	return 0;
+}
+
+int bpf_arch_tail_call_prologue_offset(void)
+{
+	return JIT_TCALL_SKIP;
 }
 
 /*
@@ -1035,7 +1031,7 @@ int build_insn(const struct bpf_insn *insn, struct jit_context *ctx)
 		break;
 	/* Tail call */
 	case BPF_JMP | BPF_TAIL_CALL:
-		if (emit_tail_call(ctx) < 0)
+		if (emit_tail_call(ctx, imm) < 0)
 			goto invalid;
 		break;
 	/* Function call */
