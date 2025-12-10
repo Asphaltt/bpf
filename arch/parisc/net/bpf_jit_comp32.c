@@ -174,25 +174,10 @@ static void emit_imm64(const s8 *rd, s32 imm_hi, s32 imm_lo,
 	emit_imm(lo(rd), imm_lo, ctx);
 }
 
-static void __build_epilogue(bool is_tail_call, struct hppa_jit_context *ctx)
+static void __build_epilogue(struct hppa_jit_context *ctx)
 {
 	const s8 *r0 = regmap[BPF_REG_0];
 	int i;
-
-	if (is_tail_call) {
-		/*
-		 * goto *(t0 + 4);
-		 * Skips first instruction of prologue which initializes tail
-		 * call counter. Assumes t0 contains address of target program,
-		 * see emit_bpf_tail_call.
-		 */
-		emit(hppa_ldo(1 * HPPA_INSN_SIZE, HPPA_REG_T0, HPPA_REG_T0), ctx);
-		emit(hppa_bv(HPPA_REG_ZERO, HPPA_REG_T0, EXEC_NEXT_INSTR), ctx);
-		/* in delay slot: */
-		emit(hppa_copy(HPPA_REG_TCC, HPPA_REG_TCC_IN_INIT), ctx);
-
-		return;
-	}
 
 	/* load epilogue function pointer and jump to it. */
 	/* exit point is either directly below, or the outest TCC exit function */
@@ -940,8 +925,9 @@ static void emit_call(bool fixed, u64 addr, struct hppa_jit_context *ctx)
 	emit_hppa_copy(HPPA_REG_RET1, lo(r0), ctx);
 }
 
-static int emit_bpf_tail_call(int insn, struct hppa_jit_context *ctx)
+static int emit_bpf_tail_call(struct hppa_jit_context *ctx, u32 map_index)
 {
+	struct bpf_map *map = ctx->prog->aux->used_maps[map_index];
 	/*
 	 * R1 -> &ctx
 	 * R2 -> &array
@@ -950,21 +936,17 @@ static int emit_bpf_tail_call(int insn, struct hppa_jit_context *ctx)
 	int off;
 	const s8 *arr_reg = regmap[BPF_REG_2];
 	const s8 *idx_reg = regmap[BPF_REG_3];
-	struct bpf_array bpfa;
-	struct bpf_prog bpfp;
 
 	/* get address of TCC main exit function for error case into rp */
 	emit(EXIT_PTR_LOAD(HPPA_REG_RP), ctx);
 
-	/* max_entries = array->map.max_entries; */
-	off = offsetof(struct bpf_array, map.max_entries);
-	BUILD_BUG_ON(sizeof(bpfa.map.max_entries) != 4);
-	emit(hppa_ldw(off, lo(arr_reg), HPPA_REG_T1), ctx);
+	BUILD_BUG_ON(sizeof(map->max_entries) != 4);
 
 	/*
-	 * if (index >= max_entries)
+	 * if (index >= map->max_entries)
 	 *   goto out;
 	 */
+	emit_imm(HPPA_REG_T1, map->max_entries, ctx);
 	emit(hppa_bltu(lo(idx_reg), HPPA_REG_T1, 2 - HPPA_BRANCH_DISPLACEMENT), ctx);
 	emit(EXIT_PTR_JUMP(HPPA_REG_RP, NOP_NEXT_INSTR), ctx);
 
@@ -978,29 +960,28 @@ static int emit_bpf_tail_call(int insn, struct hppa_jit_context *ctx)
 	emit(EXIT_PTR_JUMP(HPPA_REG_RP, NOP_NEXT_INSTR), ctx);
 
 	/*
-	 * prog = array->ptrs[index];
-	 * if (!prog)
+	 * tgt = array->ptrs[max_entries + index];
+	 * if (!tgt)
 	 *   goto out;
 	 */
-	BUILD_BUG_ON(sizeof(bpfa.ptrs[0]) != 4);
 	emit(hppa_sh2add(lo(idx_reg), lo(arr_reg), HPPA_REG_T0), ctx);
-	off = offsetof(struct bpf_array, ptrs);
-	BUILD_BUG_ON(!relative_bits_ok(off, 11));
-	emit(hppa_ldw(off, HPPA_REG_T0, HPPA_REG_T0), ctx);
+	off = offsetof(struct bpf_array, ptrs) + map->max_entries * sizeof(u32);
+	emit_imm(HPPA_REG_T1, off, ctx);
+	emit(hppa_add(HPPA_REG_T0, HPPA_REG_T1, HPPA_REG_T0), ctx);
+	emit(hppa_ldw(0, HPPA_REG_T0, HPPA_REG_T0), ctx);
 	emit(hppa_bne(HPPA_REG_T0, HPPA_REG_ZERO, 2 - HPPA_BRANCH_DISPLACEMENT), ctx);
 	emit(EXIT_PTR_JUMP(HPPA_REG_RP, NOP_NEXT_INSTR), ctx);
 
-	/*
-	 * tcc = temp_tcc;
-	 * goto *(prog->bpf_func + 4);
-	 */
-	off = offsetof(struct bpf_prog, bpf_func);
-	BUILD_BUG_ON(!relative_bits_ok(off, 11));
-	BUILD_BUG_ON(sizeof(bpfp.bpf_func) != 4);
-	emit(hppa_ldw(off, HPPA_REG_T0, HPPA_REG_T0), ctx);
-	/* Epilogue jumps to *(t0 + 4). */
-	__build_epilogue(true, ctx);
+	/* goto *tgt; */
+	emit(hppa_bv(HPPA_REG_ZERO, HPPA_REG_T0, EXEC_NEXT_INSTR), ctx);
+	/* in delay slot: copy tcc to tcc_in_init */
+	emit(hppa_copy(HPPA_REG_TCC, HPPA_REG_TCC_IN_INIT), ctx);
 	return 0;
+}
+
+int bpf_arch_tail_call_prologue_offset(void)
+{
+	return HPPA_INSN_SIZE;
 }
 
 static int emit_load_r64(const s8 *dst, const s8 *src, s16 off,
@@ -1317,7 +1298,7 @@ int bpf_jit_emit_insn(const struct bpf_insn *insn, struct hppa_jit_context *ctx,
 	/* tail call */
 	case BPF_JMP | BPF_TAIL_CALL:
 		REG_SET_SEEN_ALL(ctx);
-		if (emit_bpf_tail_call(i, ctx))
+		if (emit_bpf_tail_call(ctx, imm))
 			return -1;
 		break;
 	/* IF (dst COND imm) JUMP off */
@@ -1611,5 +1592,5 @@ void bpf_jit_build_prologue(struct hppa_jit_context *ctx)
 
 void bpf_jit_build_epilogue(struct hppa_jit_context *ctx)
 {
-	__build_epilogue(false, ctx);
+	__build_epilogue(ctx);
 }
