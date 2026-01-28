@@ -177,3 +177,20 @@ int BPF_PROG(test11, int a)
 	test11_result = a == 1;
 	return 0;
 }
+
+__u64 test12_entry_result = 0;
+__u64 test12_exit_result = 0;
+SEC("fsession/bpf_fentry_8")
+int BPF_PROG(test12, struct bpf_fentry_test_t *arg)
+{
+	__u64 *cookie = bpf_session_cookie(ctx);
+
+	if (!bpf_session_is_return(ctx)) {
+		*cookie == 0;
+		test12_entry_result = (void *) arg != NULL && arg->a == NULL;
+		return 0;
+	}
+
+	test12_exit_result = (void *) arg != NULL;
+	return 0;
+}
