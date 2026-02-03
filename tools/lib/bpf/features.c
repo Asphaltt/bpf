@@ -601,6 +601,30 @@ static int probe_kern_percpu_data(int token_fd)
 	return probe_fd(ret);
 }
 
+static int probe_kern_percpu_map_cpu_flags(int token_fd)
+{
+	LIBBPF_OPTS(bpf_map_create_opts, map_opts,
+		.token_fd = token_fd,
+		.map_flags = token_fd ? BPF_F_TOKEN_FD : 0,
+	);
+	int map, key = 0;
+	__u64 value = 0;
+	int ret;
+
+	map = bpf_map_create(BPF_MAP_TYPE_PERCPU_ARRAY, "libbpf_percpu_flags",
+			     sizeof(int), sizeof(__u64), 1, &map_opts);
+	if (map < 0) {
+		ret = -errno;
+		pr_warn("Error in %s(): %s. Couldn't create simple percpu_array map.\n",
+			__func__, errstr(ret));
+		return ret;
+	}
+
+	ret = bpf_map_update_elem(map, &key, &value, BPF_F_ALL_CPUS);
+	close(map);
+	return ret == 0 ? 1 : 0;
+}
+
 typedef int (*feature_probe_fn)(int /* token_fd */);
 
 static struct kern_feature_cache feature_cache;
@@ -681,6 +705,9 @@ static struct kern_feature_desc {
 	},
 	[FEAT_PERCPU_DATA] = {
 		"global percpu data", probe_kern_percpu_data,
+	},
+	[FEAT_PERCPU_MAP_CPU_FLAGS] = {
+		"percpu map cpu flags", probe_kern_percpu_map_cpu_flags,
 	},
 };
 

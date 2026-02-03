@@ -396,6 +396,8 @@ enum kern_feature_id {
 	FEAT_LDIMM64_FULL_RANGE_OFF,
 	/* Kernel supports percpu data */
 	FEAT_PERCPU_DATA,
+	/* Kernel supports BPF_F_CPU and BPF_F_ALL_CPUS flags */
+	FEAT_PERCPU_MAP_CPU_FLAGS,
 	__FEAT_CNT,
 };
 
