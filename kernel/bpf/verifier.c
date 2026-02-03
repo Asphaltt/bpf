@@ -7667,7 +7667,8 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 			if (tnum_is_const(reg->var_off) &&
 			    bpf_map_is_rdonly(map) &&
 			    map->ops->map_direct_value_addr &&
-			    map->map_type != BPF_MAP_TYPE_INSN_ARRAY) {
+			    map->map_type != BPF_MAP_TYPE_INSN_ARRAY &&
+			    map->map_type != BPF_MAP_TYPE_PERCPU_ARRAY) {
 				int map_off = off + reg->var_off.value;
 				u64 val = 0;
 
@@ -9670,6 +9671,12 @@ static int check_reg_const_str(struct bpf_verifier_env *env,
 		return -EACCES;
 	}
 
+	if (map->map_type == BPF_MAP_TYPE_PERCPU_ARRAY) {
+		verbose(env, "R%d points to percpu_array map which cannot be used as const string\n",
+			regno);
+		return -EACCES;
+	}
+
 	if (!bpf_map_is_rdonly(map)) {
 		verbose(env, "R%d does not point to a readonly map'\n", regno);
 		return -EACCES;
@@ -11428,6 +11435,11 @@ static int check_bpf_snprintf_call(struct bpf_verifier_env *env,
 	int err, fmt_map_off, num_args;
 	u64 fmt_addr;
 	char *fmt;
+
+	if (fmt_map->map_type == BPF_MAP_TYPE_PERCPU_ARRAY) {
+		verbose(env, "percpu_array map cannot be used for snprintf\n");
+		return -EINVAL;
+	}
 
 	/* data must be an array of u64 */
 	if (data_len_reg->var_off.value % 8)
@@ -23582,6 +23594,37 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 			delta += cnt - 1;
 			env->prog = prog = new_prog;
 			insn = new_prog->insnsi + i + delta;
+			goto next_insn;
+		}
+
+		if (bpf_jit_supports_percpu_insn() &&
+		    insn->code == (BPF_LD | BPF_IMM | BPF_DW) &&
+		    (insn->src_reg == BPF_PSEUDO_MAP_VALUE ||
+		     insn->src_reg == BPF_PSEUDO_MAP_IDX_VALUE)) {
+			struct bpf_map *map;
+
+			aux = &env->insn_aux_data[i + delta];
+			map = env->used_maps[aux->map_index];
+			if (map->map_type != BPF_MAP_TYPE_PERCPU_ARRAY)
+				goto next_insn;
+
+			/*
+			 * Reuse the original ld_imm64 insn, and add one
+			 * mov64_percpu_reg insn.
+			 */
+
+			insn_buf[0] = insn[1];
+			insn_buf[1] = BPF_MOV64_PERCPU_REG(insn->dst_reg, insn->dst_reg);
+			cnt = 2;
+
+			i++;
+			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
+			if (!new_prog)
+				return -ENOMEM;
+
+			delta    += cnt - 1;
+			env->prog = prog = new_prog;
+			insn      = new_prog->insnsi + i + delta;
 			goto next_insn;
 		}
 
