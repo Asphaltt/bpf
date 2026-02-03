@@ -1792,6 +1792,14 @@ static int map_update_elem(union bpf_attr *attr, bpfptr_t uattr)
 		goto err_put;
 	}
 
+	/*
+	 * Update the percpu_array map using one value slot across all CPUs,
+	 * as the map is updated via light weight skeleton loader.
+	 */
+	if (bpfptr_is_kernel(uattr) && map->map_type == BPF_MAP_TYPE_PERCPU_ARRAY &&
+	    (attr->flags & (BPF_F_CPU | BPF_F_ALL_CPUS)) == 0)
+		attr->flags |= BPF_F_ALL_CPUS;
+
 	err = bpf_map_check_op_flags(map, attr->flags, ~0);
 	if (err)
 		goto err_put;
