@@ -1006,6 +1006,15 @@ u32 aarch64_insn_gen_data1(enum aarch64_insn_register dst,
 		}
 		insn = aarch64_insn_get_rev64_value();
 		break;
+	case AARCH64_INSN_DATA1_RBIT:
+		insn = aarch64_insn_get_rbit_value();
+		break;
+	case AARCH64_INSN_DATA1_CLZ:
+		insn = aarch64_insn_get_clz_value();
+		break;
+	case AARCH64_INSN_DATA1_CTZ:
+		insn = aarch64_insn_get_ctz_value();
+		break;
 	default:
 		pr_err("%s: unknown data1 encoding %d\n", __func__, type);
 		return AARCH64_BREAK_FAULT;

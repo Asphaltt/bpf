@@ -248,6 +248,12 @@
 #define A64_REV16(sf, Rd, Rn) A64_DATA1(sf, Rd, Rn, REVERSE_16)
 #define A64_REV32(sf, Rd, Rn) A64_DATA1(sf, Rd, Rn, REVERSE_32)
 #define A64_REV64(Rd, Rn)     A64_DATA1(1, Rd, Rn, REVERSE_64)
+/* Rd = RBIT(Rn) */
+#define A64_RBIT(sf, Rd, Rn) A64_DATA1(sf, Rd, Rn, RBIT)
+/* Rd = CLZ(Rn) */
+#define A64_CLZ(sf, Rd, Rn) A64_DATA1(sf, Rd, Rn, CLZ)
+/* Rd = CTZ(Rn) */
+#define A64_CTZ(sf, Rd, Rn) A64_DATA1(sf, Rd, Rn, CTZ)
 
 /* Data-processing (2 source) */
 /* Rd = Rn OP Rm */
@@ -258,6 +264,9 @@
 #define A64_LSLV(sf, Rd, Rn, Rm) A64_DATA2(sf, Rd, Rn, Rm, LSLV)
 #define A64_LSRV(sf, Rd, Rn, Rm) A64_DATA2(sf, Rd, Rn, Rm, LSRV)
 #define A64_ASRV(sf, Rd, Rn, Rm) A64_DATA2(sf, Rd, Rn, Rm, ASRV)
+
+/* Rd = RORV(Rn, Rm) */
+#define A64_RORV(sf, Rd, Rn, Rm) A64_DATA2(sf, Rd, Rn, Rm, RORV)
 
 /* Data-processing (3 source) */
 /* Rd = Ra + Rn * Rm */
