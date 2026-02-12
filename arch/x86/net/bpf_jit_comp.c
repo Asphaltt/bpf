@@ -20,6 +20,8 @@
 #include <asm/unwind.h>
 #include <asm/cfi.h>
 
+#include "bpf_disasm.h"
+
 static bool all_callee_regs_used[4] = {true, true, true, true};
 
 static u8 *emit_code(u8 *ptr, u32 bytes, unsigned int len)
@@ -4116,4 +4118,117 @@ bool bpf_jit_supports_timed_may_goto(void)
 bool bpf_jit_supports_fsession(void)
 {
 	return true;
+}
+
+/*
+ * BPF call interface registers in semantic order, using decoder-style
+ * x86 GPR ids for touched-mask matching (rax=0..rdi=7, r8=8), not
+ * reg2hex[] encoding values. [0] is return register (r0/rax), [1..]
+ * are argument registers (r1..r5 => rdi, rsi, rdx, rcx, r8).
+ */
+static const u8 x86_bpf_call_regs[] = { 0, 7, 6, 2, 1, 8 };
+
+bool bpf_jit_inlines_func_call(void *func_addr)
+{
+	struct bpf_jit_func_meta meta;
+	u32 allowed_mask = 0;
+	int touched_mask, 8;
+
+	/* Relaxed policy: allow all BPF call-clobbered regs r0..r5. */
+	for (i = 0; i < ARRAY_SIZE(x86_bpf_call_regs); i++)
+		allowed_mask = BIT(x86_bpf_call_regs[i]);
+
+	touched_mask = bpf_jit_validate_func_fastcall(func_addr, &meta);
+	if (touched_mask <= 0)
+		return false;
+
+	return !(touched_mask & ~allowed_mask);
+}
+
+static u32 x86_kfunc_preserve_mask(u8 nr_params, bool retval)
+{
+	u32 mask = 0;
+	int i;
+
+	if (!retval)
+		mask |= BIT(x86_bpf_call_regs[0]);
+
+	for (i = 1; i < ARRAY_SIZE(x86_bpf_call_regs); i++)
+		if (i > nr_params)
+			mask |= BIT(x86_bpf_call_regs[i]);
+
+	return mask;
+}
+
+static void emit_push_reg(u8 **pprog, u8 reg_id)
+{
+	u8 *prog = *pprog;
+
+	if (reg_id >= 8)
+		EMIT2(0x41, 0x50 + (reg_id - 8));
+	else
+		EMIT1(0x50 + reg_id);
+
+	*pprog = prog;
+}
+
+static void emit_pop_reg(u8 **pprog, u8 reg_id)
+{
+	u8 *prog = *pprog;
+
+	if (reg_id >= 8)
+		EMIT2(0x41, 0x58 + (reg_id - 8));
+	else
+		EMIT1(0x58 + reg_id);
+
+	*pprog = prog;
+}
+
+static void emit_push_regs(u8 **pprog, u32 mask)
+{
+	u8 reg;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(x86_bpf_call_regs); i++) {
+		reg = x86_bpf_call_regs[i];
+		if (mask & BIT(reg))
+			emit_push_reg(pprog, reg);
+	}
+}
+
+static void emit_pop_regs(u8 **pprog, u32 mask)
+{
+	u8 reg;
+	int i;
+
+	for (i = ARRAY_SIZE(x86_bpf_call_regs) - 1; i >= 0; i--) {
+		reg = x86_bpf_call_regs[i];
+		if (mask & BIT(reg))
+			emit_pop_reg(pprog, reg);
+	}
+}
+
+static int bpf_inlines_kfunc_call(u8 **pprog, void *func_addr, u8 nr_params, bool retval)
+{
+	struct bpf_jit_func_meta meta;
+	u32 preserve_mask;
+	u8 *prog = *pprog;
+	int touched_mask, ret;
+
+	touched_mask = bpf_jit_validate_func_fastcall(func_addr, &meta);
+	if (touched_mask <= 0)
+		return -EINVAL;
+
+	preserve_mask = x86_kfunc_preserve_mask(nr_params, retval) & touched_mask;
+	emit_push_regs(&prog, preserve_mask);
+
+	ret = bpf_jit_copy_func(prog, func_addr, &meta);
+	if (ret < 0)
+		return ret;
+
+	prog += ret;
+	emit_pop_regs(&prog, preserve_mask);
+
+	*pprog = prog;
+	return 0;
 }
