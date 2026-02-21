@@ -452,6 +452,16 @@ static inline bool insn_is_cast_user(const struct bpf_insn *insn)
 		.off   = 0,					\
 		.imm   = IMM })
 
+/* Helper call */
+
+#define BPF_CALL_HELPER(IMM)					\
+	((struct bpf_insn) {					\
+		.code  = BPF_JMP | BPF_CALL,			\
+		.dst_reg = BPF_REG_0,				\
+		.src_reg = BPF_REG_0,				\
+		.off   = 0,					\
+		.imm   = IMM })
+
 /* Relative call */
 
 #define BPF_CALL_REL(TGT)					\

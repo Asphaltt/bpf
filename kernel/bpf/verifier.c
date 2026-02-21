@@ -18204,6 +18204,28 @@ static bool verifier_inlines_helper_call(struct bpf_verifier_env *env, s32 imm)
 	}
 }
 
+static bool bpf_kfunc_is_fastcall(struct bpf_verifier_env *env, u32 func_id, u32 flags)
+{
+	enum bpf_prog_type prog_type = resolve_prog_type(env->prog);
+
+	if (!(flags & KF_FASTCALL))
+		return false;
+
+	if (func_id == special_kfunc_list[KF_bpf_session_cookie] ||
+	    func_id == special_kfunc_list[KF_bpf_session_is_return]) {
+		if (prog_type == BPF_PROG_TYPE_TRACING)
+			return true;
+
+		if (prog_type == BPF_PROG_TYPE_KPROBE)
+			return verifier_inlines_helper_call(env, BPF_FUNC_get_current_task) ||
+				bpf_jit_inlines_helper_call(BPF_FUNC_get_current_task);
+
+		return false;
+	}
+
+	return true;
+}
+
 struct call_summary {
 	u8 num_params;
 	bool is_void;
@@ -18246,7 +18268,7 @@ static bool get_call_summary(struct bpf_verifier_env *env, struct bpf_insn *call
 			/* error would be reported later */
 			return false;
 		cs->num_params = btf_type_vlen(meta.func_proto);
-		cs->fastcall = meta.kfunc_flags & KF_FASTCALL;
+		cs->fastcall = bpf_kfunc_is_fastcall(env, meta.func_id, meta.kfunc_flags);
 		cs->is_void = btf_type_is_void(btf_type_by_id(meta.btf, meta.func_proto->type));
 		return true;
 	}
@@ -23190,6 +23212,55 @@ static int fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		insn_buf[4] = BPF_ALU64_REG(BPF_SUB, BPF_REG_0, BPF_REG_1);
 		insn_buf[5] = BPF_ALU64_IMM(BPF_NEG, BPF_REG_0, 0);
 		*cnt = 6;
+	} else if ((desc->func_id == special_kfunc_list[KF_bpf_session_is_return] ||
+		    desc->func_id == special_kfunc_list[KF_bpf_session_cookie]) &&
+		   (env->prog->expected_attach_type == BPF_TRACE_KPROBE_SESSION ||
+		    env->prog->expected_attach_type == BPF_TRACE_UPROBE_SESSION)) {
+		/*
+		 * inline bpf_session_is_return() and bpf_session_cookie() for {k,u}probe.session
+		 *
+		 *   bool bpf_session_is_return(void *ctx)
+		 *   {
+		 *       struct bpf_session_run_ctx *session_ctx;
+		 *
+		 *       session_ctx = container_of(current->bpf_ctx, struct bpf_session_run_ctx,
+		 *                                  run_ctx);
+		 *       return session_ctx->is_return;
+		 *   }
+		 *
+		 *   __u64 *bpf_session_cookie(void *ctx)
+		 *   {
+		 *       struct bpf_session_run_ctx *session_ctx;
+		 *
+		 *       session_ctx = container_of(current->bpf_ctx, struct bpf_session_run_ctx,
+		 *                                  run_ctx);
+		 *       return session_ctx->data;
+		 *   }
+		 */
+		if (verifier_inlines_helper_call(env, BPF_FUNC_get_current_task) {
+			insn_buf[0] = BPF_MOV64_IMM(BPF_REG_0, (u32)(unsigned long)&current_task);
+			insn_buf[1] = BPF_MOV64_PERCPU_REG(BPF_REG_0, BPF_REG_0);
+			insn_buf[2] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 0);
+			*cnt = 3;
+		} else if (bpf_jit_inlines_helper_call(BPF_FUNC_get_current_task)) {
+			insn_buf[0] = BPF_CALL_HELPER(BPF_FUNC_get_current_task);
+			*cnt = 1;
+		}
+		if (*cnt) {
+			int off = -offsetof(struct bpf_session_run_ctx, run_ctx);
+
+			if (desc->func_id == special_kfunc_list[KF_bpf_session_is_return])
+				off += offsetof(struct bpf_session_run_ctx, is_return);
+			else
+				off += offsetof(struct bpf_session_run_ctx, data);
+
+			insn_buf[(*cnt)++] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0,
+				offsetof(current, bpf_ctx));
+			if (desc->func_id == special_kfunc_list[KF_bpf_session_is_return])
+				insn_buf[(*cnt)++] = BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_0, off);
+			else
+				insn_buf[(*cnt)++] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, off);
+		}
 	}
 
 	if (env->insn_aux_data[insn_idx].arg_prog) {

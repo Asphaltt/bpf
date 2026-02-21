@@ -3349,8 +3349,8 @@ __bpf_kfunc __u64 *bpf_session_cookie(void *ctx)
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(session_kfunc_set_ids)
-BTF_ID_FLAGS(func, bpf_session_is_return)
-BTF_ID_FLAGS(func, bpf_session_cookie)
+BTF_ID_FLAGS(func, bpf_session_is_return, KF_FASTCALL)
+BTF_ID_FLAGS(func, bpf_session_cookie, KF_FASTCALL)
 BTF_KFUNCS_END(session_kfunc_set_ids)
 
 static int bpf_session_filter(const struct bpf_prog *prog, u32 kfunc_id)
