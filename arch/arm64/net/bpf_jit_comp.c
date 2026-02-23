@@ -26,6 +26,7 @@
 #include <asm/set_memory.h>
 
 #include "bpf_jit.h"
+#include "bpf_disasm.h"
 
 #define TMP_REG_1 (MAX_BPF_JIT_REG + 0)
 #define TMP_REG_2 (MAX_BPF_JIT_REG + 1)
@@ -1190,6 +1191,41 @@ static int add_exception_handler(const struct bpf_insn *insn,
 
 	ctx->exentry_idx++;
 	return 0;
+}
+
+static bool bpf_jit_inlines_func_call(void *func_addr)
+{
+	struct bpf_jit_func_meta meta;
+
+	return bpf_jit_validate_func_fastcall(func_addr, &meta) > 0;
+}
+
+static int bpf_inlines_func_call(const struct bpf_insn *insn, struct jit_ctx *ctx)
+{
+	bool func_addr_fixed;
+	struct bpf_jit_func_meta meta;
+	u64 func_addr;
+	int ret;
+
+	ret = bpf_jit_get_func_addr(ctx->prog, insn, false,
+				    &func_addr, &func_addr_fixed);
+	if (ret < 0)
+		return ret;
+
+	ret = bpf_jit_validate_func_fastcall((void *)func_addr, &meta);
+	if (ret <= 0)
+		return 0;
+
+	if (ctx->write) {
+		ret = bpf_jit_copy_func(&ctx->image[ctx->idx], (void *)func_addr,
+					&meta);
+		if (ret < 0)
+			return ret;
+	}
+
+	ctx->idx += meta.body_insn_cnt;
+	return meta.body_insn_cnt;
+
 }
 
 /* JITs an eBPF instruction.
