@@ -72,10 +72,54 @@ cleanup:
 	syscall__destroy(skel);
 }
 
+static void test_syscall_update_percpu_array(void)
+{
+	int err, key = 0, nr_cpus;
+	const size_t val_sz = 64;
+	struct syscall *skel;
+	void *vals;
+	struct args ctx = {
+		.max_entries = 1,
+	};
+	LIBBPF_OPTS(bpf_test_run_opts, opts,
+		    .ctx_in = &ctx,
+		    .ctx_size_in = sizeof(ctx),
+	);
+
+	nr_cpus = libbpf_num_possible_cpus();
+	if (!ASSERT_GT(nr_cpus, 0, "libbpf_num_possible_cpus"))
+		return;
+
+	skel = syscall__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "skel_load"))
+		return;
+
+	err = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.syscall_update_percpu), &opts);
+	ASSERT_OK(err, "bpf_prog_test_run_opts");
+	ASSERT_EQ(opts.retval, 1, "bpf_prog_test_run_opts retval");
+	ASSERT_EQ(skel->data->ret_update, 0, "ret_update");
+
+	vals = calloc(nr_cpus, val_sz);
+	if (!ASSERT_OK_PTR(vals, "calloc vals"))
+		goto cleanup;
+
+	err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.percpu_map), &key, vals);
+	ASSERT_EQ(err, 0, "bpf_map_lookup_elem");
+
+	for (int i = 0; i < nr_cpus; i++)
+		ASSERT_EQ(*(int *)(vals + i * val_sz), 0xdeadbeef, "percpu val");
+
+	free(vals);
+cleanup:
+	syscall__destroy(skel);
+}
+
 void test_syscall(void)
 {
 	if (test__start_subtest("load_prog"))
 		test_syscall_load_prog();
 	if (test__start_subtest("update_outer_map"))
 		test_syscall_update_outer_map();
+	if (test__start_subtest("update_percpu_array"))
+		test_syscall_update_percpu_array();
 }

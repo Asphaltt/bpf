@@ -206,3 +206,46 @@ out:
 		bpf_sys_close(outer_fd);
 	return ret;
 }
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, int);
+	__type(value, char[64]);
+	__uint(max_entries, 1);
+} percpu_map SEC(".maps");
+
+int ret_update = -1;
+
+SEC("syscall")
+int syscall_update_percpu(struct args *ctx)
+{
+	const int attr_sz = sizeof(union bpf_attr);
+	int fd = -1, zero = 0, val = 0xdeadbeef;
+	union bpf_attr *attr, *attr_fd;
+
+	attr_fd = bpf_map_lookup_elem((struct bpf_map *)&bpf_attr_array, &zero);
+	if (!attr_fd)
+		return 0;
+
+	__builtin_memset(attr_fd, 0, attr_sz);
+	attr_fd->map_id = ((struct bpf_map *)&percpu_map)->id;
+	fd = bpf_sys_bpf(BPF_MAP_GET_FD_BY_ID, attr_fd, attr_sz);
+	if (fd < 0)
+		goto out;
+
+	attr = bpf_map_lookup_elem((struct bpf_map *)&bpf_attr_array, &zero);
+	if (!attr)
+		goto out;
+
+	__builtin_memset(attr, 0, attr_sz);
+	attr->map_fd = fd;
+	attr->key = ptr_to_u64(&zero);
+	attr->value = ptr_to_u64(&val);
+
+	ret_update = bpf_sys_bpf(BPF_MAP_UPDATE_ELEM, attr, attr_sz);
+
+out:
+	if (fd >= 0)
+		bpf_sys_close(fd);
+	return ret_update == 0 ? 1 : 0;
+}
