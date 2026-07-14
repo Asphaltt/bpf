@@ -254,11 +254,16 @@ static const struct btf_type *find_type_for_map(struct btf *btf, const char *map
 	return NULL;
 }
 
-static bool is_mmapable_map(const struct bpf_map *map, char *buf, size_t sz)
+static bool is_arena_data_map(const struct bpf_map *map)
 {
 	size_t tmp_sz;
 
-	if (bpf_map__type(map) == BPF_MAP_TYPE_ARENA && bpf_map__initial_value(map, &tmp_sz)) {
+	return bpf_map__type(map) == BPF_MAP_TYPE_ARENA && bpf_map__initial_value(map, &tmp_sz);
+}
+
+static bool is_mmapable_map(const struct bpf_map *map, char *buf, size_t sz)
+{
+	if (is_arena_data_map(map)) {
 		snprintf(buf, sz, "arena");
 		return true;
 	}
@@ -1298,6 +1303,12 @@ static int do_skeleton(int argc, char **argv)
 	}
 
 	bpf_object__for_each_map(map, obj) {
+		if (use_loader && is_arena_data_map(map)) {
+			p_err("light skeletons do not support arena maps with global data");
+			err = -EOPNOTSUPP;
+			goto out;
+		}
+
 		if (!get_map_ident(map, ident, sizeof(ident))) {
 			p_err("ignoring unrecognized internal map '%s'...",
 			      bpf_map__name(map));
