@@ -286,6 +286,11 @@ bpf_testmod_ctx_create(int *err)
 	return ctx;
 }
 
+__bpf_kfunc int bpf_testmod_ctx_read(struct bpf_testmod_ctx *ctx)
+{
+	return refcount_read(&ctx->usage);
+}
+
 static void testmod_free_cb(struct rcu_head *head)
 {
 	struct bpf_testmod_ctx *ctx;
@@ -735,6 +740,7 @@ BTF_ID_FLAGS(func, bpf_kfunc_rcu_task_test, KF_RCU)
 BTF_ID_FLAGS(func, bpf_kfunc_ret_rcu_test, KF_RET_NULL | KF_RCU_PROTECTED)
 BTF_ID_FLAGS(func, bpf_kfunc_ret_rcu_test_nostruct, KF_RET_NULL | KF_RCU_PROTECTED)
 BTF_ID_FLAGS(func, bpf_testmod_ctx_create, KF_ACQUIRE | KF_RET_NULL)
+BTF_ID_FLAGS(func, bpf_testmod_ctx_read, KF_RCU)
 BTF_ID_FLAGS(func, bpf_testmod_ctx_release, KF_RELEASE)
 BTF_ID_FLAGS(func, bpf_testmod_ops3_call_test_1)
 BTF_ID_FLAGS(func, bpf_testmod_ops3_call_test_2)
@@ -2006,6 +2012,9 @@ static int bpf_testmod_init(void)
 			.kfunc_btf_id	= bpf_testmod_dtor_ids[1]
 		},
 	};
+	const u32 bpf_testmod_rcu_protected_ids[] = {
+		bpf_testmod_dtor_ids[0],
+	};
 	void **tramp;
 	int ret;
 
@@ -2023,6 +2032,9 @@ static int bpf_testmod_init(void)
 	ret = ret ?: register_btf_id_dtor_kfuncs(bpf_testmod_dtors,
 						 ARRAY_SIZE(bpf_testmod_dtors),
 						 THIS_MODULE);
+	ret = ret ?: register_btf_id_rcu_protected_ids(bpf_testmod_rcu_protected_ids,
+						       ARRAY_SIZE(bpf_testmod_rcu_protected_ids),
+						       THIS_MODULE);
 	if (ret < 0)
 		return ret;
 	if (bpf_fentry_test1(0) < 0)

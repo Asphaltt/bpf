@@ -286,6 +286,9 @@ struct {
 	__type(value, struct ctx_val);
 } ctx_map SEC(".maps");
 
+extern void bpf_rcu_read_lock(void) __ksym;
+extern void bpf_rcu_read_unlock(void) __ksym;
+
 SEC("tc")
 int kfunc_call_ctx(struct __sk_buff *skb)
 {
@@ -309,6 +312,42 @@ int kfunc_call_ctx(struct __sk_buff *skb)
 			err = -1;
 		}
 	}
+	return err;
+}
+
+SEC("syscall")
+int kfunc_call_ctx_rcu(struct syscall_test_args *args)
+{
+	struct bpf_testmod_ctx *ctx, *old;
+	struct ctx_val *ctx_val;
+	int key = 0, err = 0;
+
+	ctx_val = bpf_map_lookup_elem(&ctx_map, &key);
+	if (!ctx_val)
+		return -1;
+
+	ctx = bpf_testmod_ctx_create(&err);
+	if (!ctx)
+		return err ?: -1;
+
+	old = bpf_kptr_xchg(&ctx_val->ctx, ctx);
+	if (old)
+		bpf_testmod_ctx_release(old);
+
+	bpf_rcu_read_lock();
+	ctx = ctx_val->ctx;
+	if (!ctx) {
+		err = -2;
+		goto unlock;
+	}
+	if (ctx->usage.refs.counter != 1) {
+		err = -3;
+		goto unlock;
+	}
+	if (bpf_testmod_ctx_read(ctx) != 1)
+		err = -4;
+unlock:
+	bpf_rcu_read_unlock();
 	return err;
 }
 

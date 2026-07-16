@@ -9,6 +9,17 @@ struct syscall_test_args {
 	size_t size;
 };
 
+struct ctx_val {
+	struct bpf_testmod_ctx __kptr * ctx;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, int);
+	__type(value, struct ctx_val);
+} ctx_map SEC(".maps");
+
 SEC("?syscall")
 int kfunc_syscall_test_fail(struct syscall_test_args *args)
 {
@@ -214,6 +225,25 @@ SEC("?tc")
 int kfunc_call_test_pointer_arg_type_mismatch(struct __sk_buff *skb)
 {
 	bpf_kfunc_call_test_pass_ctx((void *)10);
+	return 0;
+}
+
+SEC("?syscall")
+int kfunc_call_ctx_rcu_fail(struct syscall_test_args *args)
+{
+	struct bpf_testmod_ctx *ctx;
+	struct ctx_val *ctx_val;
+	int key = 0;
+
+	ctx_val = bpf_map_lookup_elem(&ctx_map, &key);
+	if (!ctx_val)
+		return 0;
+
+	ctx = ctx_val->ctx;
+	if (!ctx)
+		return 0;
+
+	bpf_testmod_ctx_read(ctx);
 	return 0;
 }
 

@@ -51,6 +51,7 @@ struct kfunc_test_params {
 #define SYSCALL_NULL_CTX_TEST(name, retval) __BPF_TEST_SUCCESS(name, retval, syscall_null_ctx_test)
 
 #define TC_FAIL(name, retval, error_msg) __BPF_TEST_FAIL(name, retval, tc_test, error_msg)
+#define SYSCALL_FAIL(name, retval, error_msg) __BPF_TEST_FAIL(name, retval, syscall_test, error_msg)
 #define SYSCALL_NULL_CTX_FAIL(name, retval, error_msg) \
 	__BPF_TEST_FAIL(name, retval, syscall_null_ctx_test, error_msg)
 
@@ -71,6 +72,7 @@ static struct kfunc_test_params kfunc_tests[] = {
 	TC_FAIL(kfunc_call_test_get_mem_fail_not_const, 0, "is not a const"),
 	TC_FAIL(kfunc_call_test_mem_acquire_fail, 0, "acquire kernel function does not return PTR_TO_BTF_ID"),
 	TC_FAIL(kfunc_call_test_pointer_arg_type_mismatch, 0, "R1 expected pointer to ctx, but got scalar"),
+	SYSCALL_FAIL(kfunc_call_ctx_rcu_fail, 0, "R1 must be a rcu pointer"),
 
 	/* success cases */
 	TC_TEST(kfunc_call_test1, 12),
@@ -84,6 +86,7 @@ static struct kfunc_test_params kfunc_tests[] = {
 	SYSCALL_NULL_CTX_TEST(kfunc_syscall_test_null, 0),
 	TC_TEST(kfunc_call_test_static_unused_arg, 0),
 	TC_TEST(kfunc_call_ctx, 0),
+	SYSCALL_TEST(kfunc_call_ctx_rcu, 0),
 };
 
 struct syscall_test_args {
