@@ -4450,7 +4450,8 @@ static bool rcu_protected_object(const struct btf *btf, u32 btf_id)
 {
 	if (!btf_is_kernel(btf))
 		return true;
-	return btf_id_set_contains(&rcu_protected_types, btf_id);
+	return btf_id_set_contains(&rcu_protected_types, btf_id) ||
+	       btf_id_is_rcu_protected(btf, btf_id);
 }
 
 static struct btf_record *kptr_pointee_btf_record(struct btf_field *kptr_field)

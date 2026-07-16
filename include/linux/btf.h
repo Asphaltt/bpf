@@ -587,6 +587,8 @@ int register_btf_fmodret_id_set(const struct btf_kfunc_id_set *kset);
 s32 btf_find_dtor_kfunc(struct btf *btf, u32 btf_id);
 int register_btf_id_dtor_kfuncs(const struct btf_id_dtor_kfunc *dtors, u32 add_cnt,
 				struct module *owner);
+bool btf_id_is_rcu_protected(const struct btf *btf, u32 btf_id);
+int register_btf_id_rcu_protected_ids(const u32 *ids, u32 add_cnt, struct module *owner);
 struct btf_struct_meta *btf_find_struct_meta(const struct btf *btf, u32 btf_id);
 bool btf_is_projection_of(const char *pname, const char *tname);
 bool btf_is_prog_ctx_type(struct bpf_verifier_log *log, const struct btf *btf,
@@ -657,6 +659,15 @@ static inline s32 btf_find_dtor_kfunc(struct btf *btf, u32 btf_id)
 }
 static inline int register_btf_id_dtor_kfuncs(const struct btf_id_dtor_kfunc *dtors,
 					      u32 add_cnt, struct module *owner)
+{
+	return 0;
+}
+static inline bool btf_id_is_rcu_protected(const struct btf *btf, u32 btf_id)
+{
+	return false;
+}
+static inline int register_btf_id_rcu_protected_ids(const u32 *ids, u32 add_cnt,
+						    struct module *owner)
 {
 	return 0;
 }

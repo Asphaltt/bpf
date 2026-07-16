@@ -227,6 +227,7 @@ enum btf_kfunc_hook {
 enum {
 	BTF_KFUNC_SET_MAX_CNT = 256,
 	BTF_DTOR_KFUNC_MAX_CNT = 256,
+	BTF_RCU_PROT_MAX_CNT = 256,
 	BTF_KFUNC_FILTER_MAX_CNT = 16,
 };
 
@@ -243,6 +244,16 @@ struct btf_kfunc_set_tab {
 struct btf_id_dtor_kfunc_tab {
 	u32 cnt;
 	struct btf_id_dtor_kfunc dtors[];
+};
+
+/*
+ * Per-BTF set of struct BTF IDs registered as RCU-protected. The verifier
+ * permits referenced kptrs to these objects to be accessed directly from BPF
+ * programs in an RCU critical section.
+ */
+struct btf_id_rcu_prot_tab {
+	u32 cnt;
+	u32 ids[];
 };
 
 struct btf_struct_ops_tab {
@@ -268,6 +279,7 @@ struct btf {
 	struct rcu_head rcu;
 	struct btf_kfunc_set_tab *kfunc_set_tab;
 	struct btf_id_dtor_kfunc_tab *dtor_kfunc_tab;
+	struct btf_id_rcu_prot_tab *rcu_prot_tab;
 	struct btf_struct_metas *struct_meta_tab;
 	struct btf_struct_ops_tab *struct_ops_tab;
 	struct btf_layout *layout;
@@ -1829,6 +1841,12 @@ static void btf_free_dtor_kfunc_tab(struct btf *btf)
 	btf->dtor_kfunc_tab = NULL;
 }
 
+static void btf_free_rcu_prot_tab(struct btf *btf)
+{
+	kfree(btf->rcu_prot_tab);
+	btf->rcu_prot_tab = NULL;
+}
+
 static void btf_struct_metas_free(struct btf_struct_metas *tab)
 {
 	int i;
@@ -1867,6 +1885,7 @@ static void btf_free(struct btf *btf)
 {
 	btf_free_struct_meta_tab(btf);
 	btf_free_dtor_kfunc_tab(btf);
+	btf_free_rcu_prot_tab(btf);
 	btf_free_kfunc_set_tab(btf);
 	btf_free_struct_ops_tab(btf);
 	kvfree(btf->types);
@@ -9316,6 +9335,91 @@ end:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(register_btf_id_dtor_kfuncs);
+
+bool btf_id_is_rcu_protected(const struct btf *btf, u32 btf_id)
+{
+	struct btf_id_rcu_prot_tab *tab = btf->rcu_prot_tab;
+
+	if (!tab)
+		return false;
+
+	return bsearch(&btf_id, tab->ids, tab->cnt, sizeof(tab->ids[0]), btf_id_cmp_func) != NULL;
+}
+
+/*
+ * This function must be invoked only from initcalls/module init functions.
+ *
+ * Register kernel struct BTF IDs as RCU-protected. The verifier trusts this
+ * declaration and allows a BPF program to load a referenced kptr of a registered
+ * type as an RCU-protected pointer and access it directly in an RCU critical
+ * section, which is implicit for non-sleepable programs, without acquiring
+ * ownership through bpf_kptr_xchg().
+ */
+int register_btf_id_rcu_protected_ids(const u32 *ids, u32 add_cnt, struct module *owner)
+{
+	struct btf_id_rcu_prot_tab *tab;
+	struct btf *btf;
+	u32 tab_cnt, i;
+	int ret = 0;
+
+	btf = btf_get_module_btf(owner);
+	if (!btf)
+		return check_btf_kconfigs(owner, "rcu protected ids");
+	if (IS_ERR(btf))
+		return PTR_ERR(btf);
+
+	if (add_cnt >= BTF_RCU_PROT_MAX_CNT) {
+		pr_err("cannot register more than %d RCU-protected BTF IDs\n",
+		       BTF_RCU_PROT_MAX_CNT);
+		ret = -E2BIG;
+		goto end;
+	}
+
+	tab = btf->rcu_prot_tab;
+	/* Only one call allowed for modules */
+	if (WARN_ON_ONCE(tab && btf_is_module(btf))) {
+		ret = -EINVAL;
+		goto end;
+	}
+
+	tab_cnt = tab ? tab->cnt : 0;
+	if (tab_cnt > U32_MAX - add_cnt) {
+		ret = -EOVERFLOW;
+		goto end;
+	}
+	if (tab_cnt + add_cnt >= BTF_RCU_PROT_MAX_CNT) {
+		pr_err("cannot register more than %d RCU-protected BTF IDs\n",
+		       BTF_RCU_PROT_MAX_CNT);
+		ret = -E2BIG;
+		goto end;
+	}
+
+	tab = krealloc(btf->rcu_prot_tab,
+		       struct_size(tab, ids, tab_cnt + add_cnt),
+		       GFP_KERNEL | __GFP_NOWARN);
+	if (!tab) {
+		ret = -ENOMEM;
+		goto end;
+	}
+
+	if (!btf->rcu_prot_tab)
+		tab->cnt = 0;
+	btf->rcu_prot_tab = tab;
+
+	memcpy(tab->ids + tab->cnt, ids, add_cnt * sizeof(tab->ids[0]));
+	for (i = tab_cnt; i < tab_cnt + add_cnt; i++)
+		tab->ids[i] = btf_relocate_id(btf, tab->ids[i]);
+	tab->cnt += add_cnt;
+
+	sort(tab->ids, tab->cnt, sizeof(tab->ids[0]), btf_id_cmp_func, NULL);
+
+end:
+	if (ret)
+		btf_free_rcu_prot_tab(btf);
+	btf_put(btf);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(register_btf_id_rcu_protected_ids);
 
 #define MAX_TYPES_ARE_COMPAT_DEPTH 2
 
