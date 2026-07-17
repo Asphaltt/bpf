@@ -10,7 +10,8 @@
 #include <linux/btf_ids.h>
 
 #define BLOOM_CREATE_FLAG_MASK \
-	(BPF_F_NUMA_NODE | BPF_F_ZERO_SEED | BPF_F_ACCESS_MASK)
+	(BPF_F_NUMA_NODE | BPF_F_ZERO_SEED | BPF_F_ACCESS_MASK | \
+	 BPF_F_DYN_VALUE_ENTRIES)
 
 struct bpf_bloom_filter {
 	struct bpf_map map;

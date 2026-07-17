@@ -12,7 +12,7 @@
 #include <asm/rqspinlock.h>
 
 #define QUEUE_STACK_CREATE_FLAG_MASK \
-	(BPF_F_NUMA_NODE | BPF_F_ACCESS_MASK)
+	(BPF_F_NUMA_NODE | BPF_F_ACCESS_MASK | BPF_F_DYN_VALUE_ENTRIES)
 
 struct bpf_queue_stack {
 	struct bpf_map map;

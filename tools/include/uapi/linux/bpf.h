@@ -1466,6 +1466,9 @@ enum {
 
 /* Enable BPF ringbuf overwrite mode */
 	BPF_F_RB_OVERWRITE	= (1U << 19),
+
+/* Map value BTF is an array whose element count is derived from value_size */
+	BPF_F_DYN_VALUE_ENTRIES	= (1U << 20),
 };
 
 /* Flags for BPF_PROG_QUERY. */

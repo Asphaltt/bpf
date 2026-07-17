@@ -1232,12 +1232,56 @@ int bpf_obj_name_cpy(char *dst, const char *src, unsigned int size)
 }
 EXPORT_SYMBOL_GPL(bpf_obj_name_cpy);
 
+#define BPF_MAP_VALUE_OFFS_FIELD_MASK					\
+	(BPF_SPIN_LOCK | BPF_RES_SPIN_LOCK | BPF_TIMER | BPF_KPTR |	\
+	 BPF_LIST_HEAD | BPF_RB_ROOT | BPF_REFCOUNT | BPF_WORKQUEUE |	\
+	 BPF_UPTR | BPF_TASK_WORK)
+
 int map_check_no_btf(struct bpf_map *map,
 		     const struct btf *btf,
 		     const struct btf_type *key_type,
 		     const struct btf_type *value_type)
 {
 	return -ENOTSUPP;
+}
+
+static int map_check_dyn_value_entries(struct bpf_map *map,
+				       const struct btf *btf,
+				       const struct btf_type *value_type)
+{
+	const struct btf_type *elem_type;
+	const struct btf_array *array;
+	struct btf_record *record;
+	u32 elem_type_id, elem_size;
+
+	if (!(map->map_flags & BPF_F_DYN_VALUE_ENTRIES))
+		return 0;
+	if (BTF_INFO_KIND(value_type->info) == BTF_KIND_DATASEC)
+		return -EINVAL;
+	if (!btf_type_is_array(value_type))
+		return -EINVAL;
+
+	array = btf_array(value_type);
+	elem_type_id = array->type;
+	elem_type = btf_type_id_size(btf, &elem_type_id, &elem_size);
+	if (!elem_type || !elem_size || map->value_size % elem_size)
+		return -EINVAL;
+
+	map->dyn_value_entries = map->value_size / elem_size;
+	if (!map->dyn_value_entries)
+		return -EINVAL;
+
+	if (!__btf_type_is_struct(elem_type))
+		return 0;
+
+	record = btf_parse_fields(btf, elem_type, BPF_MAP_VALUE_OFFS_FIELD_MASK,
+				  elem_size);
+	if (IS_ERR(record))
+		return PTR_ERR(record);
+	if (!record)
+		return 0;
+	btf_record_free(record);
+	return -EACCES;
 }
 
 static int map_check_btf(struct bpf_map *map, struct bpf_token *token,
@@ -1259,14 +1303,21 @@ static int map_check_btf(struct bpf_map *map, struct bpf_token *token,
 	}
 
 	value_type = btf_type_id_size(btf, &btf_value_id, &value_size);
-	if (!value_type || value_size != map->value_size)
+	if (!value_type)
 		return -EINVAL;
 
-	map->record = btf_parse_fields(btf, value_type,
-				       BPF_SPIN_LOCK | BPF_RES_SPIN_LOCK | BPF_TIMER | BPF_KPTR | BPF_LIST_HEAD |
-				       BPF_RB_ROOT | BPF_REFCOUNT | BPF_WORKQUEUE | BPF_UPTR |
-				       BPF_TASK_WORK,
-				       map->value_size);
+	ret = map_check_dyn_value_entries(map, btf, value_type);
+	if (ret)
+		return ret;
+	if (!(map->map_flags & BPF_F_DYN_VALUE_ENTRIES) &&
+	    value_size != map->value_size)
+		return -EINVAL;
+
+	if (map->map_flags & BPF_F_DYN_VALUE_ENTRIES)
+		map->record = NULL;
+	else
+		map->record = btf_parse_fields(btf, value_type, BPF_MAP_VALUE_OFFS_FIELD_MASK,
+					       map->value_size);
 	if (!IS_ERR_OR_NULL(map->record)) {
 		int i;
 
@@ -1401,6 +1452,9 @@ static int map_create_alloc(union bpf_attr *attr, bpfptr_t uattr, struct bpf_ver
 		}
 	} else if (attr->btf_key_type_id && !attr->btf_value_type_id) {
 		bpf_log(log, "Invalid btf_value_type_id.\n");
+		return -EINVAL;
+	} else if ((attr->map_flags & BPF_F_DYN_VALUE_ENTRIES) && !attr->btf_value_type_id) {
+		bpf_log(log, "BPF_F_DYN_VALUE_ENTRIES requires value BTF.\n");
 		return -EINVAL;
 	}
 
