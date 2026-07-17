@@ -1170,6 +1170,7 @@ LIBBPF_API __u32 bpf_map__value_size(const struct bpf_map *map);
  * corresponding data section skeleton pointer must be reinitialized.
  */
 LIBBPF_API int bpf_map__set_value_size(struct bpf_map *map, __u32 size);
+LIBBPF_API int bpf_map__set_entries_number(struct bpf_map *map, __u32 entries);
 /* get map key/value BTF type IDs */
 LIBBPF_API __u32 bpf_map__btf_key_type_id(const struct bpf_map *map);
 LIBBPF_API __u32 bpf_map__btf_value_type_id(const struct bpf_map *map);

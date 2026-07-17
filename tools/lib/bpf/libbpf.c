@@ -5359,12 +5359,68 @@ bpf_object__populate_internal_map(struct bpf_object *obj, struct bpf_map *map)
 
 static void bpf_map__destroy(struct bpf_map *map);
 
+static int bpf_map__dyn_value_elem_size(const struct bpf_map *map)
+{
+	const struct btf_type *value_type;
+	const struct btf_array *array;
+	const struct btf *btf;
+	int elem_sz;
+
+	btf = bpf_object__btf(map->obj);
+	if (!btf || !map->btf_value_type_id) {
+		pr_warn("map '%s': BPF_F_DYN_VALUE_ENTRIES requires value BTF\n",
+			map->name);
+		return -EINVAL;
+	}
+
+	value_type = skip_mods_and_typedefs(btf, map->btf_value_type_id, NULL);
+	if (!value_type || !btf_is_array(value_type)) {
+		pr_warn("map '%s': BPF_F_DYN_VALUE_ENTRIES requires array value type\n",
+			map->name);
+		return -EINVAL;
+	}
+
+	array = btf_array(value_type);
+	elem_sz = btf__resolve_size(btf, array->type);
+	if (elem_sz <= 0) {
+		pr_warn("map '%s': can't determine dynamic value array element size: %d\n",
+			map->name, elem_sz);
+		return -EINVAL;
+	}
+
+	return elem_sz;
+}
+
+static int bpf_map__validate_dyn_value_entries(const struct bpf_map *map, __u32 flags)
+{
+	int err;
+
+	if (!(flags & BPF_F_DYN_VALUE_ENTRIES))
+		return 0;
+
+	if (bpf_map__is_internal(map)) {
+		pr_warn("map '%s': BPF_F_DYN_VALUE_ENTRIES is not supported for global data maps\n",
+			map->name);
+		return -EINVAL;
+	}
+
+	err = bpf_map__dyn_value_elem_size(map);
+	if (err < 0)
+		return err;
+
+	return 0;
+}
+
 static int bpf_object__create_map(struct bpf_object *obj, struct bpf_map *map, bool is_inner)
 {
 	LIBBPF_OPTS(bpf_map_create_opts, create_attr);
 	struct bpf_map_def *def = &map->def;
 	const char *map_name = NULL;
 	int err = 0, map_fd;
+
+	err = bpf_map__validate_dyn_value_entries(map, def->map_flags);
+	if (err)
+		return err;
 
 	if (kernel_supports(obj, FEAT_PROG_NAME))
 		map_name = map->name;
@@ -10846,8 +10902,13 @@ __u32 bpf_map__map_flags(const struct bpf_map *map)
 
 int bpf_map__set_map_flags(struct bpf_map *map, __u32 flags)
 {
+	int err;
+
 	if (map_is_created(map))
 		return libbpf_err(-EBUSY);
+	err = bpf_map__validate_dyn_value_entries(map, flags);
+	if (err)
+		return libbpf_err(err);
 	map->def.map_flags = flags;
 	return 0;
 }
@@ -10997,6 +11058,33 @@ int bpf_map__set_value_size(struct bpf_map *map, __u32 size)
 	}
 
 	map->def.value_size = size;
+	return 0;
+}
+
+int bpf_map__set_entries_number(struct bpf_map *map, __u32 entries)
+{
+	__u64 value_size;
+	int elem_sz;
+
+	if (map_is_created(map))
+		return libbpf_err(-EBUSY);
+	if (!entries)
+		return libbpf_err(-EINVAL);
+	if (!(map->def.map_flags & BPF_F_DYN_VALUE_ENTRIES)) {
+		pr_warn("map '%s': %s() requires BPF_F_DYN_VALUE_ENTRIES\n",
+			map->name, __func__);
+		return libbpf_err(-EINVAL);
+	}
+
+	elem_sz = bpf_map__dyn_value_elem_size(map);
+	if (elem_sz < 0)
+		return libbpf_err(elem_sz);
+
+	value_size = (__u64)elem_sz * entries;
+	if (value_size > UINT_MAX)
+		return libbpf_err(-E2BIG);
+
+	map->def.value_size = (__u32)value_size;
 	return 0;
 }
 
