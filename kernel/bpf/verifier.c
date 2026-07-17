@@ -11128,6 +11128,7 @@ enum special_kfunc_type {
 	KF_bpf_session_is_return,
 	KF_bpf_stream_vprintk,
 	KF_bpf_stream_print_stack,
+	KF_bpf_map_value_entries,
 };
 
 BTF_ID_LIST(special_kfunc_list)
@@ -11225,6 +11226,7 @@ BTF_ID_UNUSED
 #endif
 BTF_ID(func, bpf_stream_vprintk)
 BTF_ID(func, bpf_stream_print_stack)
+BTF_ID(func, bpf_map_value_entries)
 
 static bool is_bpf_obj_new_kfunc(u32 func_id)
 {
@@ -13181,6 +13183,21 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		if (meta.btf == btf_vmlinux && (meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock] ||
 		    meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock_irqsave]))
 			__mark_reg_const_zero(env, &regs[BPF_REG_0]);
+		if (meta.btf == btf_vmlinux &&
+		    meta.func_id == special_kfunc_list[KF_bpf_map_value_entries]) {
+			if (!meta.map.ptr) {
+				verifier_bug(env, "bpf_map_value_entries has no map");
+				return -EFAULT;
+			}
+			if (meta.map.ptr->map_flags & BPF_F_DYN_VALUE_ENTRIES) {
+				__mark_reg_known(&regs[BPF_REG_0], meta.map.ptr->dyn_value_entries);
+			} else {
+				verbose(env,
+					"kfunc %s requires map with BPF_F_DYN_VALUE_ENTRIES\n",
+					func_name);
+				return -EINVAL;
+			}
+		}
 		mark_btf_func_reg_size(env, BPF_REG_0, t->size);
 	} else if (btf_type_is_ptr(t)) {
 		ptr_type = btf_type_skip_modifiers(desc_btf, t->type, &ptr_type_id);
