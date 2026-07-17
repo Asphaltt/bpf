@@ -216,10 +216,19 @@ __bpf_kfunc s64 bpf_map_sum_elem_count(const struct bpf_map *map)
 	return ret;
 }
 
+__bpf_kfunc int bpf_map_value_entries(const struct bpf_map *map__map)
+{
+	if (!map__map || !(map__map->map_flags & BPF_F_DYN_VALUE_ENTRIES))
+		return -EINVAL;
+
+	return map__map->dyn_value_entries;
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(bpf_map_iter_kfunc_ids)
 BTF_ID_FLAGS(func, bpf_map_sum_elem_count)
+BTF_ID_FLAGS(func, bpf_map_value_entries)
 BTF_KFUNCS_END(bpf_map_iter_kfunc_ids)
 
 static const struct btf_kfunc_id_set bpf_map_iter_kfunc_set = {
