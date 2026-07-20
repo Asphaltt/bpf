@@ -13,6 +13,7 @@
 #include "tailcall_cgrp_storage.skel.h"
 #include "tailcall_sleepable.skel.h"
 #include "tailcall_callback.skel.h"
+#include "tailcall_bpf2bpf_fentry.skel.h"
 
 /* test_tailcall_1 checks basic functionality by patching multiple locations
  * in a single program for a single tail call slot with nop->jmp, jmp->nop
@@ -1907,6 +1908,83 @@ static void test_tailcall_callback(void)
 	RUN_TESTS(tailcall_callback);
 }
 
+static int tailcall_fentry_chain_setup(struct tailcall_bpf2bpf_entry **skels, int idx,
+				       struct tailcall_bpf2bpf_entry *prev)
+{
+	struct tailcall_bpf2bpf_entry *skel;
+	int err, prog_fd, key;
+
+	skel = tailcall_bpf2bpf_entry__open()
+	if (!ASSERT_OK_PTR(skel, "tailcall_bpf2bpf_entry__open"))
+		return -ENOMEM;
+
+	prog_fd = bpf_program__fd(prev->progs.main1);
+	err = bpf_program__set_attach_target(skel->progs.main, prog_fd, "subprog");
+	if (!ASSERT_OK(err, "bpf_program__set_attach_target"))
+		goto err;
+
+	err = tailcall_bpf2bpf_entry__load(skel);
+	if (!ASSERT_OK(err, "tailcall_bpf2bpf_entry__load"))
+		goto err;
+
+	key = 0;
+	prog_fd = bpf_program__fd(skel->progs.main1);
+	err = bpf_map_update_elem(bpf_map__fd(skel->maps.jmp_table), &key, &prog_fd, 0);
+	if (!ASSERT_OK(err, "bpf_map_update_elem"))
+		goto err;
+
+	skel->links.main = bpf_program__attach_trace(skel->progs.main);
+	err = -errno;
+	if (!ASSERT_OK_PTR(skel->links.main, "bpf_program__attach_trace"))
+		goto err;
+
+	skels[idx] = skel;
+	return 0;
+
+err:
+	tailcall_bpf2bpf_entry__destroy(skel);
+	return err;
+}
+
+#define TAILCALL_FENTRY_CHAIN_SZ 10000
+
+static void test_tailcall_fentry_chain(void)
+{
+	struct tailcall_bpf2bpf_entry *skel, *curr;
+	struct tailcall_bpf2bpf_entry **skels;
+	LIBBPF_OPTS(bpf_test_run_opts, topts);
+	int err, i = 0;
+
+	skel = tailcall_bpf2bpf_entry__open_and_load()
+	if (!ASSERT_OK_PTR(skel, "tailcall_bpf2bpf_entry__open_and_load"))
+		return;
+
+	skels = calloc(TAILCALL_FENTRY_CHAIN_SZ, typeof(*skels));
+	if (!ASSERT_OK_PTR(skels, "calloc skels"))
+		goto out;
+
+	curr = skel;
+	for (i = 0; i < TAILCALL_FENTRY_CHAIN_SZ; i++) {
+		err = tailcall_fentry_chain_setup(skels, i, curr);
+		if (err)
+			goto out;
+
+		curr = skels[i];
+	}
+
+	skel->links.main1 = bpf_program__attach_trace(skel->progs.main1);
+	if (!ASSERT_OK_PTR(skel->links.main1, "bpf_program__attach_trace"))
+		goto out;
+
+	err = bpf_prog_run_opts(bpf_program__fd(skel->progs.main1), &tops);
+	ASSERT_OK(err, "bpf_prog_run_opts");
+
+out:
+	for (; i >= 0; i--)
+		tailcall_bpf2bpf_entry__destroy(skels[i]);
+	tailcall_bpf2bpf_entry__destroy(skel);
+}
+
 void test_tailcalls(void)
 {
 	if (test__start_subtest("tailcall_1"))
@@ -1974,4 +2052,6 @@ void test_tailcalls(void)
 	if (test__start_subtest("tailcall_cgrp_storage_no_storage_bridge"))
 		test_tailcall_cgrp_storage_no_storage_bridge();
 	test_tailcall_callback();
+	if (test__start_subtest("tailcall_fentry_chain"))
+		test_tailcall_fentry_chain();
 }
