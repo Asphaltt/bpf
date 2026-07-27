@@ -8,6 +8,10 @@
 
 char *user_ptr = (char *)1;
 char *invalid_kern_ptr = (char *)-1;
+char *invalid_aligned_kern_ptr = (char *)-8;
+char aligned_word[] __aligned(8) = "12345678";
+char strnstr_haystack[] __aligned(8) = "xxxxxxx123456789";
+char strnstr_fault_page[__PAGE_SIZE] SEC(".data.strnstr_fault");
 
 /*
  * When passing userspace pointers, the error code differs based on arch:
@@ -107,5 +111,62 @@ SEC("syscall") __retval(-EFAULT) int test_strnstr_pagefault1(void *ctx) { return
 SEC("syscall") __retval(-EFAULT) int test_strnstr_pagefault2(void *ctx) { return bpf_strnstr("hello", invalid_kern_ptr, 1); }
 SEC("syscall") __retval(-EFAULT) int test_strncasestr_pagefault1(void *ctx) { return bpf_strncasestr(invalid_kern_ptr, "hello", 1); }
 SEC("syscall") __retval(-EFAULT) int test_strncasestr_pagefault2(void *ctx) { return bpf_strncasestr("hello", invalid_kern_ptr, 1); }
+
+/* Exercise word-load faults and the byte retry at the same address. */
+SEC("syscall")
+__retval(-EFAULT)
+int test_strncasecmp_word_pagefault(void *ctx)
+{
+	return bpf_strncasecmp(invalid_aligned_kern_ptr, aligned_word, 8);
+}
+
+SEC("syscall")
+__retval(-EFAULT)
+int test_strnchr_word_pagefault(void *ctx)
+{
+	return bpf_strnchr(invalid_aligned_kern_ptr, 8, 'a');
+}
+
+SEC("syscall")
+__retval(-EFAULT)
+int test_strrchr_word_pagefault(void *ctx)
+{
+	return bpf_strrchr(invalid_aligned_kern_ptr, 'a');
+}
+
+SEC("syscall")
+__retval(-EFAULT)
+int test_strnlen_word_pagefault(void *ctx)
+{
+	return bpf_strnlen(invalid_aligned_kern_ptr, 8);
+}
+
+SEC("syscall")
+__retval(-EFAULT)
+int test_strspn_word_pagefault(void *ctx)
+{
+	return bpf_strspn(invalid_aligned_kern_ptr, "a");
+}
+
+SEC("syscall")
+__retval(-EFAULT)
+int test_strnstr_word_pagefault1(void *ctx)
+{
+	return bpf_strnstr(invalid_aligned_kern_ptr, aligned_word, 8);
+}
+
+SEC("syscall")
+__retval(-EFAULT)
+int test_strnstr_word_pagefault2(void *ctx)
+{
+	/*
+	 * Keep the needle's first byte readable at the end of the value,
+	 * then fault the aligned word load and byte retry in the guard
+	 * page.
+	 */
+	strnstr_fault_page[__PAGE_SIZE - 1] = '1';
+
+	return bpf_strnstr(strnstr_haystack + 7, strnstr_fault_page + __PAGE_SIZE - 1, 9);
+}
 
 char _license[] SEC("license") = "GPL";
