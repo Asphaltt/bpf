@@ -1402,9 +1402,10 @@ struct bpf_trampoline {
 	int progs_cnt[BPF_TRAMP_MAX];
 	/* Executable image of trampoline */
 	struct bpf_tramp_image *cur_image;
-	/* Used as temporary old image storage for multi_attach */
+	/* Used as temporary images storage for multi_attach */
 	struct {
 		struct bpf_tramp_image *old_image;
+		struct bpf_tramp_image *new_image;
 		u32 old_flags;
 	} multi_attach;
 };
@@ -1522,6 +1523,9 @@ int bpf_trampoline_multi_attach(struct bpf_prog *prog, u32 *ids,
 				struct bpf_tracing_multi_link *link);
 void bpf_trampoline_multi_detach(struct bpf_prog *prog,
 				 struct bpf_tracing_multi_link *link);
+int bpf_trampoline_multi_prog_attach(struct bpf_prog *prog, u32 *ids, u64 *keys,
+				     struct bpf_tracing_multi_link *link);
+void bpf_trampoline_multi_prog_detach(struct bpf_tracing_multi_link *link);
 void bpf_trampoline_set_flags(struct bpf_trampoline *tr, u32 flags);
 
 /*
@@ -1645,6 +1649,14 @@ static inline void bpf_trampoline_multi_detach(struct bpf_prog *prog,
 					       struct bpf_tracing_multi_link *link)
 {
 }
+
+static inline int bpf_trampoline_multi_prog_attach(struct bpf_prog *prog, u32 *ids, u64 *keys,
+						   struct bpf_tracing_multi_link *link)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void bpf_trampoline_multi_prog_detach(struct bpf_tracing_multi_link *link) {}
 static inline void bpf_trampoline_set_flags(struct bpf_trampoline *tr, u32 flags) {}
 #endif
 
@@ -2004,6 +2016,8 @@ struct bpf_tracing_multi_link {
 	struct bpf_tracing_multi_data data;
 	u64 *cookies;
 	struct bpf_tramp_node *fexits;
+	struct bpf_text_poke *pokes;
+	struct bpf_prog **tgt_progs;
 	int nodes_cnt;
 	struct bpf_tracing_multi_node nodes[] __counted_by(nodes_cnt);
 };
