@@ -20,5 +20,12 @@ int egress_alt(struct __sk_buff *skb)
 	return 1;
 }
 
+SEC("cgroup_skb/ingress")
+int ingress_alt(struct __sk_buff *skb)
+{
+	__sync_fetch_and_add(&alt_calls, 1);
+	return 1;
+}
+
 char _license[] SEC("license") = "GPL";
 

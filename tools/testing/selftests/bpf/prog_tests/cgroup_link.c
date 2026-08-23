@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <test_progs.h>
+#include "cap_helpers.h"
 #include "cgroup_helpers.h"
 #include "testing_helpers.h"
 #include "test_cgroup_link.skel.h"
@@ -24,7 +25,115 @@ int ping_and_check(int exp_calls, int exp_alt_calls)
 	return 0;
 }
 
-void serial_test_cgroup_link(void)
+static void test_cgroup_link_update(void)
+{
+	const char *link_pin_path = "/sys/fs/bpf/cgroup_link_test";
+	const __u64 modified_caps = (1ULL << CAP_BPF) |
+				    (1ULL << CAP_NET_ADMIN) |
+				    (1ULL << CAP_SYS_ADMIN);
+	struct test_cgroup_link *cap_skel = NULL, *update_skel = NULL;
+	struct bpf_link *link = NULL;
+	__u64 saved_caps = 0;
+	bool caps_changed = false, link_pinned = false;
+	int cgroup_fd = -1, err;
+
+	err = setup_cgroup_environment();
+	if (!ASSERT_OK(err, "cg_init"))
+		return;
+
+	cgroup_fd = create_and_get_cgroup("/cg1");
+	if (!ASSERT_GE(cgroup_fd, 0, "cg_create"))
+		goto cleanup;
+
+	err = join_cgroup("/cg1");
+	if (!ASSERT_OK(err, "cg_join"))
+		goto cleanup;
+
+	err = cap_enable_effective(1ULL << CAP_BPF, &saved_caps);
+	if (!ASSERT_OK(err, "enable_cap_bpf"))
+		goto cleanup;
+	caps_changed = true;
+
+	err = cap_disable_effective((1ULL << CAP_NET_ADMIN) |
+				    (1ULL << CAP_SYS_ADMIN), NULL);
+	if (!ASSERT_OK(err, "disable_net_admin"))
+		goto cleanup;
+
+	cap_skel = test_cgroup_link__open_and_load();
+	if (!ASSERT_OK_PTR(cap_skel, "skel_open_load"))
+		goto cleanup;
+
+	link = bpf_program__attach_cgroup(cap_skel->progs.egress, cgroup_fd);
+	if (!ASSERT_ERR_PTR(link, "attach_without_net_admin"))
+		goto cleanup;
+	err = libbpf_get_error(link);
+	link = NULL;
+	if (!ASSERT_EQ(err, -EPERM, "attach_err"))
+		goto cleanup;
+
+	err = cap_enable_effective(1ULL << CAP_NET_ADMIN, NULL);
+	if (!ASSERT_OK(err, "enable_net_admin"))
+		goto cleanup;
+
+	link = bpf_program__attach_cgroup(cap_skel->progs.egress, cgroup_fd);
+	if (!ASSERT_OK_PTR(link, "attach_with_net_admin"))
+		goto cleanup;
+
+	if (access(link_pin_path, F_OK)) {
+		if (!ASSERT_EQ(errno, ENOENT, "pin_path_missing"))
+			goto cleanup;
+		err = bpf_link__pin(link, link_pin_path);
+		if (!ASSERT_OK(err, "link_pin"))
+			goto cleanup;
+		link_pinned = true;
+	}
+
+	bpf_link__destroy(link);
+	link = NULL;
+
+	/*
+	 * CAP_SYS_ADMIN is a fallback for CAP_NET_ADMIN in BPF capability
+	 * checks, so drop both to ensure link update only relies on CAP_BPF.
+	 */
+	err = cap_disable_effective((1ULL << CAP_NET_ADMIN) |
+				    (1ULL << CAP_SYS_ADMIN), NULL);
+	if (!ASSERT_OK(err, "disable_net_admin_for_update"))
+		goto cleanup;
+
+	link = bpf_link__open(link_pin_path);
+	if (!ASSERT_OK_PTR(link, "link_open"))
+		goto cleanup;
+
+	update_skel = test_cgroup_link__open_and_load();
+	if (!ASSERT_OK_PTR(update_skel, "update_skel_open_load"))
+		goto cleanup;
+
+	err = bpf_link__update_program(link, update_skel->progs.ingress_alt);
+	ASSERT_OK(err, "link_update");
+
+cleanup:
+	if (link_pinned) {
+		if (link && !libbpf_get_error(link))
+			err = bpf_link__unpin(link);
+		else
+			err = unlink(link_pin_path);
+		ASSERT_OK(err, "link_unpin");
+	}
+	bpf_link__destroy(link);
+	test_cgroup_link__destroy(update_skel);
+	test_cgroup_link__destroy(cap_skel);
+	if (caps_changed) {
+		err = cap_disable_effective(modified_caps, NULL);
+		ASSERT_OK(err, "disable_modified_caps");
+		err = cap_enable_effective(saved_caps & modified_caps, NULL);
+		ASSERT_OK(err, "restore_caps");
+	}
+	if (cgroup_fd >= 0)
+		close(cgroup_fd);
+	cleanup_cgroup_environment();
+}
+
+static void test_cgroup_link(void)
 {
 	struct {
 		const char *path;
@@ -252,4 +361,12 @@ cleanup:
 			close(cgs[i].fd);
 	}
 	cleanup_cgroup_environment();
+}
+
+void serial_test_cgroup_link(void)
+{
+	if (test__start_subtest("link_update"))
+		test_cgroup_link_update();
+	if (test__start_subtest("link_lifecycle"))
+		test_cgroup_link();
 }
