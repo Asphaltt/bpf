@@ -583,6 +583,9 @@ static void codegen_attach_detach(struct bpf_object *obj, const char *obj_name)
 	bpf_object__for_each_program(prog, obj) {
 		const char *tp_name;
 
+		if (!bpf_program__autoload(prog))
+			continue;
+
 		codegen("\
 			\n\
 			\n\
@@ -629,6 +632,9 @@ static void codegen_attach_detach(struct bpf_object *obj, const char *obj_name)
 		", obj_name);
 
 	bpf_object__for_each_program(prog, obj) {
+		if (!bpf_program__autoload(prog))
+			continue;
+
 		codegen("\
 			\n\
 				ret = ret < 0 ? ret : %1$s__%2$s__attach(skel);   \n\
@@ -646,6 +652,9 @@ static void codegen_attach_detach(struct bpf_object *obj, const char *obj_name)
 		", obj_name);
 
 	bpf_object__for_each_program(prog, obj) {
+		if (!bpf_program__autoload(prog))
+			continue;
+
 		codegen("\
 			\n\
 				skel_closenz(skel->links.%1$s_fd);	    \n\
@@ -676,6 +685,9 @@ static void codegen_destroy(struct bpf_object *obj, const char *obj_name)
 		obj_name);
 
 	bpf_object__for_each_program(prog, obj) {
+		if (!bpf_program__autoload(prog))
+			continue;
+
 		codegen("\
 			\n\
 				skel_closenz(skel->progs.%1$s.prog_fd);	    \n\
@@ -701,9 +713,10 @@ static void codegen_destroy(struct bpf_object *obj, const char *obj_name)
 		obj_name);
 }
 
-static int gen_trace(struct bpf_object *obj, const char *obj_name, const char *header_guard)
+static int gen_trace(struct bpf_object *obj, const char *obj_name, const char *header_guard,
+		     const struct gen_loader_opts *loader_opts, size_t map_cnt,
+		     size_t prog_cnt)
 {
-	DECLARE_LIBBPF_OPTS(gen_loader_opts, opts);
 	struct bpf_load_and_run_opts sopts = {};
 	char sig_buf[MAX_SIG_SIZE];
 	__u8 prog_sha[SHA256_DIGEST_LENGTH];
@@ -711,23 +724,6 @@ static int gen_trace(struct bpf_object *obj, const char *obj_name, const char *h
 
 	char ident[256];
 	int err = 0;
-
-	if (sign_progs)
-		opts.gen_hash = true;
-
-	err = bpf_object__gen_loader(obj, &opts);
-	if (err)
-		return err;
-
-	err = bpf_object__load(obj);
-	if (err) {
-		p_err("failed to load object file");
-		goto out;
-	}
-
-	/* If there was no error during load then gen_loader_opts
-	 * are populated with the loader program.
-	 */
 
 	/* finish generating 'struct skel' */
 	codegen("\
@@ -750,9 +746,14 @@ static int gen_trace(struct bpf_object *obj, const char *obj_name, const char *h
 			skel = (struct %1$s *)skel_alloc(sizeof(*skel));    \n\
 			if (!skel)					    \n\
 				goto cleanup;				    \n\
-			skel->ctx.sz = (char *)&skel->links - (char *)skel; \n\
 		",
-		obj_name, opts.data_sz);
+		obj_name);
+	printf("\tskel->ctx.sz = sizeof(skel->ctx)");
+	if (map_cnt)
+		printf(" + sizeof(skel->maps)");
+	if (prog_cnt)
+		printf(" + sizeof(skel->progs)");
+	printf(";\n");
 	bpf_object__for_each_map(map, obj) {
 		const void *mmap_data = NULL;
 		size_t mmap_size = 0;
@@ -795,22 +796,22 @@ static int gen_trace(struct bpf_object *obj, const char *obj_name, const char *h
 			static const char opts_data[] __attribute__((__aligned__(8))) = \"\\\n\
 		",
 		obj_name);
-	print_hex(opts.data, opts.data_sz);
+	print_hex(loader_opts->data, loader_opts->data_sz);
 	codegen("\
 		\n\
 		\";							    \n\
 			static const char opts_insn[] __attribute__((__aligned__(8))) = \"\\\n\
 		");
-	print_hex(opts.insns, opts.insns_sz);
+	print_hex(loader_opts->insns, loader_opts->insns_sz);
 	codegen("\
 		\n\
 		\";\n");
 
 	if (sign_progs) {
-		sopts.insns = opts.insns;
-		sopts.insns_sz = opts.insns_sz;
-		sopts.data = opts.data;
-		sopts.data_sz = opts.data_sz;
+		sopts.insns = loader_opts->insns;
+		sopts.insns_sz = loader_opts->insns_sz;
+		sopts.data = loader_opts->data;
+		sopts.data_sz = loader_opts->data_sz;
 		sopts.excl_prog_hash = prog_sha;
 		sopts.excl_prog_hash_sz = sizeof(prog_sha);
 		sopts.signature = sig_buf;
@@ -1250,6 +1251,7 @@ static int do_skeleton(int argc, char **argv)
 	char header_guard[MAX_OBJ_NAME_LEN + sizeof("__SKEL_H__")];
 	size_t map_cnt = 0, prog_cnt = 0, attach_map_cnt = 0, file_sz, mmap_sz;
 	DECLARE_LIBBPF_OPTS(bpf_object_open_opts, opts);
+	DECLARE_LIBBPF_OPTS(gen_loader_opts, loader_opts);
 	char obj_name[MAX_OBJ_NAME_LEN] = "", *obj_data;
 	struct bpf_object *obj = NULL;
 	const char *file;
@@ -1325,6 +1327,23 @@ static int do_skeleton(int argc, char **argv)
 		p_err("failed to open BPF object file: %s", err_buf);
 		goto out_obj;
 	}
+	/* Object preparation can adjust program autoload state, so generate the
+	 * loader before counting programs and emitting the light skeleton layout.
+	 */
+	if (use_loader) {
+		if (sign_progs)
+			loader_opts.gen_hash = true;
+
+		err = bpf_object__gen_loader(obj, &loader_opts);
+		if (err)
+			goto out;
+
+		err = bpf_object__load(obj);
+		if (err) {
+			p_err("failed to load object file");
+			goto out;
+		}
+	}
 
 	bpf_object__for_each_map(map, obj) {
 		if (!get_map_ident(map, ident, sizeof(ident))) {
@@ -1339,13 +1358,10 @@ static int do_skeleton(int argc, char **argv)
 		map_cnt++;
 	}
 	bpf_object__for_each_program(prog, obj) {
-		prog_cnt++;
+		if (use_loader && !bpf_program__autoload(prog))
+			continue;
 
-		if (use_loader && !bpf_program__autoload(prog)) {
-			p_err("program '%s' is marked as non-autoload, which is not supported for light skeletons",
-			      bpf_program__name(prog));
-			return -1;
-		}
+		prog_cnt++;
 	}
 
 	get_header_guard(header_guard, obj_name, "SKEL_H");
@@ -1401,13 +1417,18 @@ static int do_skeleton(int argc, char **argv)
 	}
 
 	btf = bpf_object__btf(obj);
-	err = gen_st_ops_shadow(obj_name, btf, obj);
-	if (err)
-		goto out;
+	if (!use_loader) {
+		err = gen_st_ops_shadow(obj_name, btf, obj);
+		if (err)
+			goto out;
+	}
 
 	if (prog_cnt) {
 		printf("\tstruct {\n");
 		bpf_object__for_each_program(prog, obj) {
+			if (use_loader && !bpf_program__autoload(prog))
+				continue;
+
 			if (use_loader)
 				printf("\t\tstruct bpf_prog_desc %s;\n",
 				       bpf_program__name(prog));
@@ -1417,10 +1438,21 @@ static int do_skeleton(int argc, char **argv)
 		}
 		printf("\t} progs;\n");
 	}
+	/* Keep loader map and program descriptors contiguous at the beginning of
+	 * the light skeleton. The loader accesses them as a packed context.
+	 */
+	if (use_loader) {
+		err = gen_st_ops_shadow(obj_name, btf, obj);
+		if (err)
+			goto out;
+	}
 
 	if (prog_cnt + attach_map_cnt) {
 		printf("\tstruct {\n");
 		bpf_object__for_each_program(prog, obj) {
+			if (use_loader && !bpf_program__autoload(prog))
+				continue;
+
 			if (use_loader)
 				printf("\t\tint %s_fd;\n",
 				       bpf_program__name(prog));
@@ -1457,7 +1489,8 @@ static int do_skeleton(int argc, char **argv)
 			goto out;
 	}
 	if (use_loader) {
-		err = gen_trace(obj, obj_name, header_guard);
+		err = gen_trace(obj, obj_name, header_guard, &loader_opts,
+				map_cnt, prog_cnt);
 		goto out;
 	}
 
