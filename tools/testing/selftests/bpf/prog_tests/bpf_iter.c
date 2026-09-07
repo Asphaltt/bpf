@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <task_local_storage_helpers.h>
+#include <bpf/libbpf_internal.h>
 #include "bpf_iter_ipv6_route.skel.h"
 #include "bpf_iter_netlink.skel.h"
 #include "bpf_iter_bpf_map.skel.h"
@@ -1712,6 +1713,47 @@ static void test_task_vma_offset(void)
 	test_task_vma_offset_common(NULL, false);
 }
 
+static void test_lsm_wrong_attach_type(void)
+{
+	DECLARE_LIBBPF_OPTS(bpf_iter_attach_opts, opts);
+	struct bpf_iter_tasks *skel;
+	struct bpf_program *prog;
+	struct bpf_link *link;
+	int err;
+
+	skel = bpf_iter_tasks__open();
+	if (!ASSERT_OK_PTR(skel, "bpf_iter_tasks__open"))
+		return;
+
+	bpf_object__for_each_program(prog, skel->obj)
+		bpf_program__set_autoload(prog, false);
+
+	prog = skel->progs.dump_task;
+	if (!ASSERT_OK(bpf_program__set_autoload(prog, true), "set_autoload") ||
+	    !ASSERT_OK(bpf_program__set_type(prog, BPF_PROG_TYPE_LSM), "set_type") ||
+	    !ASSERT_EQ(bpf_program__expected_attach_type(prog), BPF_TRACE_ITER,
+		       "expected_attach_type") ||
+	    !ASSERT_OK(bpf_program__set_attach_target(prog, 0, "task"),
+		       "set_attach_target"))
+		goto out;
+
+	ASSERT_TRUE(bpf_program__autoload(prog), "autoload");
+
+	err = bpf_iter_tasks__load(skel);
+	if (ASSERT_ERR(err, "load_lsm_iter"))
+		goto out;
+
+	link = bpf_program__attach_iter(prog, &opts);
+	err = libbpf_get_error(link);
+	ASSERT_NEQ(err, 0, "attach_iter err");
+	link = libbpf_ptr(link);
+	if (!ASSERT_NULL(link, "attach_iter link"))
+		bpf_link__destroy(link);
+
+out:
+	bpf_iter_tasks__destroy(skel);
+}
+
 void test_bpf_iter(void)
 {
 	ASSERT_OK(pthread_mutex_init(&do_nothing_mutex, NULL), "pthread_mutex_init");
@@ -1794,4 +1836,6 @@ void test_bpf_iter(void)
 		test_bpf_sockmap_map_iter_fd();
 	if (test__start_subtest("vma_offset"))
 		test_task_vma_offset();
+	if (test__start_subtest("lsm_wrong_attach_type"))
+		test_lsm_wrong_attach_type();
 }
