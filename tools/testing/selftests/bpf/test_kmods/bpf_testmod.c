@@ -30,6 +30,28 @@
 
 #define CONNECT_TIMEOUT_SEC 1
 
+/*
+ * Regular C function so the compiler records an ftrace entry. The first
+ * two-byte NOP's offset is recorded at runtime to account for the prologue.
+ */
+#ifdef CONFIG_X86_64
+static unsigned int bpf_testmod_kprobe_overlap_offset;
+
+noinline __noclone void bpf_testmod_kprobe_overlap(void)
+{
+	unsigned long first;
+
+	asm volatile("leaq 1f(%%rip), %0\n"
+		     "1:\n"
+		     ".rept 16\n"
+		     ".byte 0x66, 0x90\n"
+		     ".endr\n"
+		     : "=r"(first));
+	WRITE_ONCE(bpf_testmod_kprobe_overlap_offset,
+		   first - (unsigned long)bpf_testmod_kprobe_overlap);
+}
+#endif
+
 typedef int (*func_proto_typedef)(long);
 typedef int (*func_proto_typedef_nested1)(func_proto_typedef);
 typedef int (*func_proto_typedef_nested2)(func_proto_typedef_nested1);
@@ -660,6 +682,18 @@ bpf_testmod_test_read(struct file *file, struct kobject *kobj,
 	union bpf_testmod_union_arg_2 union_arg2 = { .arg = {2, 3} };
 	int i = 1;
 
+#ifdef CONFIG_X86_64
+	if (off == 4096)
+		return scnprintf(buf, len, "%u\n",
+				 READ_ONCE(bpf_testmod_kprobe_overlap_offset));
+	if (off == 4097) {
+		u8 *addr = (u8 *)bpf_testmod_kprobe_overlap +
+			   READ_ONCE(bpf_testmod_kprobe_overlap_offset);
+
+		return scnprintf(buf, len, "%u\n", READ_ONCE(*addr));
+	}
+#endif
+
 	while (bpf_testmod_return_ptr(i))
 		i++;
 
@@ -745,6 +779,14 @@ bpf_testmod_test_write(struct file *file, struct kobject *kobj,
 		.off = off,
 		.len = len,
 	};
+
+#ifdef CONFIG_X86_64
+	if (len == sizeof("kprobe-opt-overlap\n") - 1 &&
+	    !memcmp(buf, "kprobe-opt-overlap\n", len)) {
+		bpf_testmod_kprobe_overlap();
+		return len;
+	}
+#endif
 
 	trace_bpf_testmod_test_write_bare_tp(current, &ctx);
 
