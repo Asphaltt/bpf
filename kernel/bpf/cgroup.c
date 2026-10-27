@@ -1697,19 +1697,24 @@ static const struct bpf_link_ops bpf_cgroup_link_lops = {
 	 BPF_F_PREORDER |	\
 	 BPF_F_LINK)
 
-int cgroup_bpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
+int cgroup_bpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog,
+			   struct bpf_verifier_log *log)
 {
 	struct bpf_link_primer link_primer;
 	struct bpf_cgroup_link *link;
 	struct cgroup *cgrp;
 	int err;
 
-	if (attr->link_create.flags & (~BPF_F_LINK_ATTACH_MASK))
+	if (attr->link_create.flags & (~BPF_F_LINK_ATTACH_MASK)) {
+		bpf_log(log, "Invalid flags.\n");
 		return -EINVAL;
+	}
 
 	cgrp = cgroup_get_from_fd(attr->link_create.target_fd);
-	if (IS_ERR(cgrp))
+	if (IS_ERR(cgrp)) {
+		bpf_log(log, "Invalid target_fd.\n");
 		return PTR_ERR(cgrp);
+	}
 
 	link = kzalloc_obj(*link, GFP_USER);
 	if (!link) {
