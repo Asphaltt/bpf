@@ -253,3 +253,60 @@ cleanup:
 	}
 	cleanup_cgroup_environment();
 }
+
+static void test_cgroup_link_create_log(int target_fd, __u32 flags, int err_exp, const char *msg)
+{
+	struct test_cgroup_link *skel;
+	char log_buf[128] = {};
+	int fd, prog_fd;
+	LIBBPF_OPTS(bpf_log_opts, log_opts,
+		    .buf = log_buf,
+		    .size = sizeof(log_buf),
+		    .level = 1,
+	);
+	LIBBPF_OPTS(bpf_link_create_opts, opts,
+		    .log_opts = &log_opts,
+		    .flags = flags,
+	);
+
+	skel = test_cgroup_link__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "test_cgroup_link__open_and_load"))
+		return;
+
+	prog_fd = bpf_program__fd(skel->progs.egress);
+	fd = bpf_link_create(prog_fd, target_fd, BPF_CGROUP_INET_EGRESS, &opts);
+	if (!ASSERT_LT(fd, 0, "bpf_link_create")) {
+		close(fd);
+		goto out;
+	}
+
+	ASSERT_EQ(fd, err_exp, "err");
+	ASSERT_STREQ(log_buf, msg, "log_buf");
+	ASSERT_EQ(log_opts.true_size, strlen(msg) + 1, "log_size");
+
+out:
+	test_cgroup_link__destroy(skel);
+}
+
+static void test_log_invalid_flags(void)
+{
+	const char *msg = "Invalid flags.\n";
+
+	test_cgroup_link_create_log(-1, BPF_F_ALLOW_OVERRIDE, -EINVAL, msg);
+}
+
+static void test_log_invalid_target_fd(void)
+{
+	const char *msg = "Invalid target_fd.\n";
+
+	test_cgroup_link_create_log(-1, 0, -EBADF, msg);
+}
+
+void test_cgroup_link_log(void)
+{
+	if (test__start_subtest("invalid_flags"))
+		test_log_invalid_flags();
+	if (test__start_subtest("invalid_target_fd"))
+		test_log_invalid_target_fd();
+}
+
