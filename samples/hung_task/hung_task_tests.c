@@ -15,6 +15,9 @@
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
+#include <linux/ktime.h>
+#include <linux/mm.h>
+#include <linux/mmzone.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/semaphore.h>
@@ -25,6 +28,7 @@
 #define HUNG_TASK_SEM_FILE		"semaphore"
 #define HUNG_TASK_RWSEM_READ_FILE	"rw_semaphore_read"
 #define HUNG_TASK_RWSEM_WRITE_FILE	"rw_semaphore_write"
+#define HUNG_TASK_ZONE_LOCK_FILE	"zone_lock"
 #define SLEEP_SECOND			256
 
 static const char dummy_string[] = "This is a dummy string.";
@@ -131,6 +135,42 @@ static const struct file_operations hung_task_rwsem_write_fops = {
 	.read = read_dummy_rwsem_write,
 };
 
+/* Zone lock function */
+static ssize_t read_dummy_zone_lock(struct file *file, char __user *user_buf,
+				    size_t count, loff_t *ppos)
+{
+	struct page *page;
+	struct zone *zone;
+	ktime_t end;
+
+	if (!count || *ppos >= sizeof(dummy_string))
+		return 0;
+
+	/* Keep the page alive so its zone remains populated during the test. */
+	page = alloc_page(GFP_KERNEL);
+	if (!page)
+		return -ENOMEM;
+
+	zone = page_zone(page);
+	pr_info("hung_task: holding zone %s lock for %u seconds\n",
+		zone->name, SLEEP_SECOND);
+	scoped_guard(spinlock_irqsave, &zone->lock) {
+		end = ktime_add_ns(ktime_get(), (u64)SLEEP_SECOND * NSEC_PER_SEC);
+		while (ktime_before(ktime_get(), end))
+			cpu_relax();
+	}
+	pr_info("hung_task: released zone lock\n");
+	__free_page(page);
+
+	return simple_read_from_buffer(user_buf, count, ppos, dummy_string,
+				       sizeof(dummy_string));
+}
+
+static const struct file_operations hung_task_zone_lock_fops = {
+	.owner = THIS_MODULE,
+	.read = read_dummy_zone_lock,
+};
+
 static int __init hung_task_tests_init(void)
 {
 	hung_task_dir = debugfs_create_dir(HUNG_TASK_DIR, NULL);
@@ -146,6 +186,8 @@ static int __init hung_task_tests_init(void)
 			    &hung_task_rwsem_read_fops);
 	debugfs_create_file(HUNG_TASK_RWSEM_WRITE_FILE, 0400, hung_task_dir, NULL,
 			    &hung_task_rwsem_write_fops);
+	debugfs_create_file(HUNG_TASK_ZONE_LOCK_FILE, 0400, hung_task_dir, NULL,
+			    &hung_task_zone_lock_fops);
 
 	return 0;
 }
