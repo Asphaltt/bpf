@@ -235,6 +235,108 @@ static inline void debug_show_blocker(struct task_struct *task, unsigned long ti
 }
 #endif
 
+#ifdef CONFIG_DETECT_HUNG_TASK_BLOCKER
+#define HUNG_TASK_MAX_WAITERS 16
+
+struct hung_task_waiter {
+	struct task_struct *task;
+	unsigned long blocker;
+};
+
+static struct hung_task_waiter waiter_tasks[HUNG_TASK_MAX_WAITERS * 2];
+static struct hung_task_waiter blocker_tasks[HUNG_TASK_MAX_WAITERS];
+static unsigned int nr_waiters, nr_blockers;
+static unsigned int omitted_waiters, omitted_blockers;
+
+static void collect_blocker_waiter(struct task_struct *task, bool hung,
+				   bool reported)
+{
+	unsigned long blocker = READ_ONCE(task->blocker);
+	struct hung_task_waiter *entry;
+
+	if (!blocker || hung_task_get_blocker_type(blocker) == BLOCKER_TYPE_MUTEX)
+		return;
+
+	if (hung) {
+		if (!reported)
+			return;
+
+		if (nr_blockers == ARRAY_SIZE(blocker_tasks))
+			omitted_blockers++;
+		else
+			entry = &blocker_tasks[nr_blockers++];
+	} else {
+		if (nr_waiters == ARRAY_SIZE(waiter_tasks))
+			omitted_waiters++;
+		else
+			entry = &waiter_tasks[nr_waiters++];
+	}
+
+	get_task_struct(task);
+	entry->task = task;
+	entry->blocker = blocker;
+}
+
+static void dump_blocker_waiters(void)
+{
+	unsigned int i, j;
+
+	for (i = 0; i < nr_waiters; i++) {
+		struct hung_task_waiter *waiter = &waiter_tasks[i];
+		struct task_struct *t = waiter->task;
+
+		if (READ_ONCE(t->blocker) != waiter->blocker)
+			continue;
+
+		for (j = 0; j < nr_blockers; j++) {
+			struct hung_task_waiter *blocked = &blocker_tasks[j];
+			struct task_struct *task = blocked->task;
+			unsigned long type;
+
+			if (waiter->blocker != blocked->blocker ||
+			    READ_ONCE(task->blocker) != blocked->blocker)
+				continue;
+
+			type = hung_task_get_blocker_type(waiter->blocker);
+			if (type == BLOCKER_TYPE_SEM)
+				pr_err("INFO: task %s:%d also waits on the semaphore blocking task %s:%d.\n",
+				       t->comm, t->pid, task->comm, task->pid);
+			else
+				pr_err("INFO: task %s:%d also waits as a %s on the rwsem blocking task %s:%d.\n",
+				       t->comm, t->pid,
+				       type == BLOCKER_TYPE_RWSEM_READER ? "reader" : "writer",
+				       task->comm, task->pid);
+
+			sched_show_task(t);
+			break;
+		}
+	}
+
+	if (nr_blockers && (omitted_waiters || omitted_blockers))
+		pr_info("INFO: waiter snapshot truncated: %u waiters and %u reported blockers omitted.\n",
+			omitted_waiters, omitted_blockers);
+
+	for (i = 0; i < nr_waiters; i++)
+		put_task_struct(waiter_tasks[i].task);
+	for (i = 0; i < nr_blockers; i++)
+		put_task_struct(blocker_tasks[i].task);
+
+	memset(blocker_tasks, 0, sizeof(blocker_tasks));
+	memset(waiter_tasks, 0, sizeof(waiter_tasks));
+	nr_waiters = nr_blockers = 0;
+	omitted_waiters = omitted_blockers = 0;
+}
+#else
+static inline void collect_blocker_waiter(struct task_struct *task, bool hung,
+					 bool reported)
+{
+}
+
+static inline void dump_blocker_waiters(void)
+{
+}
+#endif
+
 /**
  * hung_task_info - Print diagnostic details for a hung task
  * @t: Pointer to the detected hung task.
@@ -343,6 +445,8 @@ static void check_hung_uninterruptible_tasks(unsigned long timeout)
 		}
 
 		if (task_is_hung(t, timeout)) {
+			bool reported = hung_task_warnings_budget || hung_task_call_panic;
+
 			/*
 			 * Increment the global counter so that userspace could
 			 * start migrating tasks ASAP. But count the current
@@ -352,10 +456,14 @@ static void check_hung_uninterruptible_tasks(unsigned long timeout)
 			atomic_long_inc(&sysctl_hung_task_detect_count);
 			this_round_count++;
 			hung_task_info(t, timeout, this_round_count);
+			collect_blocker_waiter(t, true, reported || hung_task_call_panic);
+		} else {
+			collect_blocker_waiter(t, false, false);
 		}
 	}
  unlock:
 	rcu_read_unlock();
+	dump_blocker_waiters();
 
 	if (!this_round_count) {
 		hung_task_warnings_budget =
