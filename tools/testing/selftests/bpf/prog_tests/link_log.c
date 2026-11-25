@@ -21,6 +21,15 @@ static const struct link_log_case {
 	  { .iter.len = sizeof(union bpf_iter_link_info) }, -EINVAL, "iter_info_len" },
 	{ "cgroup", BPF_PROG_TYPE_CGROUP_SKB, BPF_CGROUP_INET_EGRESS, NULL,
 	  { .cgroup.expected_revision = 2 }, -ESTALE, "revision" },
+	{ "perf_event", BPF_PROG_TYPE_PERF_EVENT, BPF_PERF_EVENT, NULL,
+	  {}, -EBADF, "Invalid target_fd" },
+	{ "tracepoint", BPF_PROG_TYPE_TRACEPOINT, BPF_PERF_EVENT, NULL,
+	  {}, -EINVAL, "Prog type must be BPF_PROG_TYPE_PERF_EVENT" },
+	{ "kprobe_multi", BPF_PROG_TYPE_KPROBE, BPF_TRACE_KPROBE_MULTI, NULL,
+	  { .kprobe_multi.cnt = 1 }, -EINVAL, "Exactly one of kprobe_multi.addrs" },
+	{ "uprobe_multi", BPF_PROG_TYPE_KPROBE, BPF_TRACE_UPROBE_MULTI, NULL,
+	  { .uprobe_multi = { .cnt = 1, .offsets = (const unsigned long[]){ 0 } } },
+	  -EINVAL, "uprobe_multi.path must be set" },
 };
 
 static void run_test(const struct link_log_case *test)
@@ -30,7 +39,8 @@ static void run_test(const struct link_log_case *test)
 		BPF_EXIT_INSN(),
 	};
 	struct bpf_link_create_opts opts = test->opts;
-	int prog_fd, fd, btf_id, cg = -1;
+	int prog_fd, fd, btf_id, target_fd = 0;
+	bool close_target_fd = false;
 	LIBBPF_OPTS(bpf_prog_load_opts, load_opts,
 		    .expected_attach_type = test->attach_type,
 	);
@@ -53,15 +63,34 @@ static void run_test(const struct link_log_case *test)
 	if (!ASSERT_OK_FD(prog_fd, "bpf_prog_load"))
 		return;
 
-	if (test->type == BPF_PROG_TYPE_CGROUP_SKB) {
-		cg = test__join_cgroup("/link_log");
-		if (!ASSERT_OK_FD(cg, "join_cgroup"))
+	switch (test->type) {
+	case BPF_PROG_TYPE_CGROUP_SKB:
+		target_fd = test__join_cgroup("/link_log");
+		if (!ASSERT_OK_FD(target_fd, "join_cgroup"))
 			goto out;
+		close_target_fd = true;
+		break;
+	case BPF_PROG_TYPE_TRACEPOINT: {
+		struct perf_event_attr attr = {
+			.type = PERF_TYPE_SOFTWARE,
+			.config = PERF_COUNT_SW_DUMMY,
+			.size = sizeof(attr),
+		};
+
+		target_fd = syscall(__NR_perf_event_open, &attr, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
+		if (!ASSERT_OK_FD(target_fd, "perf_event_open"))
+			goto out;
+		close_target_fd = true;
+		break;
+	}
+	case BPF_PROG_TYPE_PERF_EVENT:
+		target_fd = -1;
+		break;
 	}
 
 	opts.sz = sizeof(opts);
 	opts.log_opts = &log_opts;
-	fd = bpf_link_create(prog_fd, cg < 0 ? 0 : cg, test->attach_type, &opts);
+	fd = bpf_link_create(prog_fd, target_fd, test->attach_type, &opts);
 	if (fd >= 0)
 		close(fd);
 
@@ -69,8 +98,8 @@ static void run_test(const struct link_log_case *test)
 	ASSERT_HAS_SUBSTR(buf, test->msg, "log");
 	ASSERT_EQ(log_opts.true_size, strlen(buf) + 1, "true_size");
 
-	if (cg >= 0)
-		close(cg);
+	if (close_target_fd)
+		close(target_fd);
 out:
 	close(prog_fd);
 }
