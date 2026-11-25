@@ -3277,23 +3277,30 @@ static u64 bpf_uprobe_multi_cookie(struct bpf_run_ctx *ctx)
 	return run_ctx->uprobe->cookie;
 }
 
-static int bpf_uprobe_multi_get_path(const union bpf_attr *attr, struct path *path)
+static int bpf_uprobe_multi_get_path(const union bpf_attr *attr, struct path *path,
+				     struct bpf_verifier_log *log)
 {
 	void __user *upath = u64_to_user_ptr(attr->link_create.uprobe_multi.path);
 	u32 path_fd = attr->link_create.uprobe_multi.path_fd;
 	u32 flags = attr->link_create.uprobe_multi.flags;
+	int ret;
 
 	if (flags & BPF_F_UPROBE_MULTI_PATH_FD) {
 		/*
 		 * When BPF_F_UPROBE_MULTI_PATH_FD is set, the executable is
 		 * identified by path_fd, upath must be NULL.
 		 */
-		if (upath)
+		if (upath) {
+			bpf_log(log,
+				"uprobe_multi.path must be NULL when BPF_F_UPROBE_MULTI_PATH_FD is set.\n");
 			return -EINVAL;
+		}
 
 		CLASS(fd, f)(path_fd);
-		if (fd_empty(f))
+		if (fd_empty(f)) {
+			bpf_log(log, "Invalid path_fd.\n");
 			return -EBADF;
+		}
 		*path = fd_file(f)->f_path;
 		path_get(path);
 		return 0;
@@ -3303,13 +3310,23 @@ static int bpf_uprobe_multi_get_path(const union bpf_attr *attr, struct path *pa
 	 * When BPF_F_UPROBE_MULTI_PATH_FD is not set, the path is resolved
 	 * relative to the cwd (AT_FDCWD) or absolute using the upath string.
 	 */
-	if (!upath || path_fd)
+	if (!upath) {
+		bpf_log(log, "uprobe_multi.path must be set.\n");
 		return -EINVAL;
+	}
+	if (path_fd) {
+		bpf_log(log, "path_fd must not be set.\n");
+		return -EINVAL;
+	}
 
-	return user_path_at(AT_FDCWD, upath, LOOKUP_FOLLOW, path);
+	ret = user_path_at(AT_FDCWD, upath, LOOKUP_FOLLOW, path);
+	if (ret)
+		bpf_log(log, "Lookup path failed.\n");
+	return ret;
 }
 
-int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
+int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *prog,
+				 struct bpf_verifier_log *log)
 {
 	struct bpf_uprobe_multi_link *link = NULL;
 	unsigned long __user *uref_ctr_offsets;
@@ -3324,19 +3341,26 @@ int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 	pid_t pid;
 	int err;
 
-	/* no support for 32bit archs yet */
-	if (sizeof(u64) != sizeof(void *))
+	if (sizeof(u64) != sizeof(void *)) {
+		bpf_log(log, "No support for 32bit archs yet.\n");
 		return -EOPNOTSUPP;
+	}
 
-	if (attr->link_create.flags)
+	if (attr->link_create.flags) {
+		bpf_log(log, "flags must be zero.\n");
 		return -EINVAL;
+	}
 
-	if (!is_uprobe_multi(prog))
+	if (!is_uprobe_multi(prog)) {
+		bpf_log(log, "expected_attach_type must be uprobe_multi or uprobe_session.\n");
 		return -EINVAL;
+	}
 
 	flags = attr->link_create.uprobe_multi.flags;
-	if (flags & ~(BPF_F_UPROBE_MULTI_RETURN | BPF_F_UPROBE_MULTI_PATH_FD))
+	if (flags & ~(BPF_F_UPROBE_MULTI_RETURN | BPF_F_UPROBE_MULTI_PATH_FD)) {
+		bpf_log(log, "Invalid uprobe_multi.flags.\n");
 		return -EINVAL;
+	}
 
 	/*
 	 * offsets and cnt are mandatory,
@@ -3348,8 +3372,11 @@ int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 
 	if (!uoffsets || !cnt || pid < 0)
 		return -EINVAL;
-	if (cnt > MAX_UPROBE_MULTI_CNT)
+	if (cnt > MAX_UPROBE_MULTI_CNT) {
+		bpf_log(log, "uprobe_multi.cnt %u is larger than limit %u.\n",
+			cnt, MAX_UPROBE_MULTI_CNT);
 		return -E2BIG;
+	}
 
 	uref_ctr_offsets = u64_to_user_ptr(attr->link_create.uprobe_multi.ref_ctr_offsets);
 	ucookies = u64_to_user_ptr(attr->link_create.uprobe_multi.cookies);
@@ -3360,15 +3387,25 @@ int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 	 * fails before anything is looked up or allocated.
 	 */
 	size = sizeof(*uoffsets) * cnt;
-	if (!access_ok(uoffsets, size) || !access_ok(uref_ctr_offsets, size) ||
-	    !access_ok(ucookies, size))
+	if (!access_ok(uoffsets, size)) {
+		bpf_log(log, "offsets access check failed.\n");
 		return -EFAULT;
+	}
+	if (!access_ok(uref_ctr_offsets, size)) {
+		bpf_log(log, "ref_ctr_offsets access check failed.\n");
+		return -EFAULT;
+	}
+	if (!access_ok(ucookies, size)) {
+		bpf_log(log, "cookies access check failed.\n");
+		return -EFAULT;
+	}
 
-	err = bpf_uprobe_multi_get_path(attr, &path);
+	err = bpf_uprobe_multi_get_path(attr, &path, log);
 	if (err)
 		return err;
 
 	if (!d_is_reg(path.dentry)) {
+		bpf_log(log, "Invalid path.\n");
 		err = -EBADF;
 		goto error_path_put;
 	}
@@ -3378,6 +3415,7 @@ int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 		task = get_pid_task(find_vpid(pid), PIDTYPE_TGID);
 		rcu_read_unlock();
 		if (!task) {
+			bpf_log(log, "Invalid uprobe_multi.pid.\n");
 			err = -ESRCH;
 			goto error_path_put;
 		}
@@ -3393,18 +3431,22 @@ int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 
 	for (i = 0; i < cnt; i++) {
 		if (get_user(uprobes[i].offset, uoffsets + i)) {
+			bpf_log(log, "Read offsets[%u] failed.\n", i);
 			err = -EFAULT;
 			goto error_free;
 		}
 		if (uprobes[i].offset < 0) {
+			bpf_log(log, "offsets[%u] must not be negative.\n", i);
 			err = -EINVAL;
 			goto error_free;
 		}
 		if (uref_ctr_offsets && get_user(uprobes[i].ref_ctr_offset, uref_ctr_offsets + i)) {
+			bpf_log(log, "Read ref_ctr_offsets[%u] failed.\n", i);
 			err = -EFAULT;
 			goto error_free;
 		}
 		if (ucookies && get_user(uprobes[i].cookie, ucookies + i)) {
+			bpf_log(log, "Read cookies[%u] failed.\n", i);
 			err = -EFAULT;
 			goto error_free;
 		}
@@ -3436,6 +3478,7 @@ int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 						    uprobes[i].ref_ctr_offset,
 						    &uprobes[i].consumer);
 		if (IS_ERR(uprobes[i].uprobe)) {
+			bpf_log(log, "Register uprobes[%u] failed.\n", i);
 			err = PTR_ERR(uprobes[i].uprobe);
 			link->cnt = i;
 			goto error_unregister;
@@ -3461,8 +3504,10 @@ error_path_put:
 	return err;
 }
 #else /* !CONFIG_UPROBES */
-int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
+int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *prog,
+				 struct bpf_verifier_log *log)
 {
+	bpf_log(log, "This kernel does not support uprobes.\n");
 	return -EOPNOTSUPP;
 }
 static u64 bpf_uprobe_multi_cookie(struct bpf_run_ctx *ctx)
