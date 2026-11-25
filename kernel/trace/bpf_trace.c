@@ -2401,7 +2401,8 @@ static unsigned long ftrace_get_entry_ip(unsigned long fentry_ip)
 	return ip ? : fentry_ip;
 }
 
-static int copy_user_syms(struct user_syms *us, unsigned long __user *usyms, u32 cnt)
+static int copy_user_syms(struct user_syms *us, unsigned long __user *usyms, u32 cnt,
+			  struct bpf_verifier_log *log)
 {
 	unsigned long __user usymbol;
 	const char **syms = NULL;
@@ -2409,8 +2410,10 @@ static int copy_user_syms(struct user_syms *us, unsigned long __user *usyms, u32
 	int err = -ENOMEM;
 	unsigned int i;
 
-	if (!access_ok(usyms, cnt * sizeof(*usyms)))
+	if (!access_ok(usyms, cnt * sizeof(*usyms))) {
+		bpf_log(log, "Symbols access check failed.\n");
 		return -EFAULT;
+	}
 
 	syms = kvmalloc_objs(*syms, cnt);
 	if (!syms)
@@ -2422,14 +2425,20 @@ static int copy_user_syms(struct user_syms *us, unsigned long __user *usyms, u32
 
 	for (p = buf, i = 0; i < cnt; i++) {
 		if (get_user(usymbol, usyms + i)) {
+			bpf_log(log, "Read syms[%u] pointer failed.\n", i);
 			err = -EFAULT;
 			goto error;
 		}
 		err = strncpy_from_user(p, (const char __user *) usymbol, KSYM_NAME_LEN);
-		if (err == KSYM_NAME_LEN)
+		if (err == KSYM_NAME_LEN) {
+			bpf_log(log, "Syms[%u] is too long.\n", i);
 			err = -E2BIG;
-		if (err < 0)
 			goto error;
+		}
+		if (err < 0) {
+			bpf_log(log, "Copy syms[%u] name failed.\n", i);
+			goto error;
+		}
 		syms[i] = p;
 		p += err + 1;
 	}
@@ -2810,7 +2819,8 @@ static int addrs_check_error_injection_list(unsigned long *addrs, u32 cnt)
 	return 0;
 }
 
-int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
+int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *prog,
+				 struct bpf_verifier_log *log)
 {
 	struct bpf_kprobe_multi_link *link = NULL;
 	struct bpf_link_primer link_primer;
@@ -2822,38 +2832,53 @@ int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 	void __user *usyms;
 	int err;
 
-	/* no support for 32bit archs yet */
-	if (sizeof(u64) != sizeof(void *))
+	if (sizeof(u64) != sizeof(void *)) {
+		bpf_log(log, "No support for 32bit archs yet.\n");
 		return -EOPNOTSUPP;
+	}
 
-	if (attr->link_create.flags)
+	if (attr->link_create.flags) {
+		bpf_log(log, "flags must be zero.\n");
 		return -EINVAL;
+	}
 
-	if (!is_kprobe_multi(prog))
+	if (!is_kprobe_multi(prog)) {
+		bpf_log(log, "expected_attach_type must be kprobe_multi or kprobe_session.\n");
 		return -EINVAL;
+	}
 
-	/* kprobe_multi is not allowed to be sleepable. */
-	if (prog->sleepable)
+	if (prog->sleepable) {
+		bpf_log(log, "Sleepable prog is not allowed.\n");
 		return -EINVAL;
+	}
 
-	/* Writing to context is not allowed for kprobes. */
-	if (prog->aux->kprobe_write_ctx)
+	if (prog->aux->kprobe_write_ctx) {
+		bpf_log(log, "Writing to context is not allowed.\n");
 		return -EINVAL;
+	}
 
 	flags = attr->link_create.kprobe_multi.flags;
-	if (flags & ~BPF_F_KPROBE_MULTI_RETURN)
+	if (flags & ~BPF_F_KPROBE_MULTI_RETURN) {
+		bpf_log(log, "Invalid kprobe_multi.flags.\n");
 		return -EINVAL;
+	}
 
 	uaddrs = u64_to_user_ptr(attr->link_create.kprobe_multi.addrs);
 	usyms = u64_to_user_ptr(attr->link_create.kprobe_multi.syms);
-	if (!!uaddrs == !!usyms)
+	if (!!uaddrs == !!usyms) {
+		bpf_log(log,
+			"Exactly one of kprobe_multi.addrs and kprobe_multi.syms must be set.\n");
 		return -EINVAL;
+	}
 
 	cnt = attr->link_create.kprobe_multi.cnt;
 	if (!cnt)
 		return -EINVAL;
-	if (cnt > MAX_KPROBE_MULTI_CNT)
+	if (cnt > MAX_KPROBE_MULTI_CNT) {
+		bpf_log(log, "kprobe_multi.cnt %u is larger than limit %u.\n",
+			cnt, MAX_KPROBE_MULTI_CNT);
 		return -E2BIG;
+	}
 
 	size = cnt * sizeof(*addrs);
 	addrs = kvmalloc_objs(*addrs, cnt);
@@ -2884,7 +2909,7 @@ int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 		};
 		struct user_syms us;
 
-		err = copy_user_syms(&us, usyms, cnt);
+		err = copy_user_syms(&us, usyms, cnt, log);
 		if (err)
 			goto error;
 
@@ -2901,6 +2926,7 @@ int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 	}
 
 	if (prog->kprobe_override && addrs_check_error_injection_list(addrs, cnt)) {
+		bpf_log(log, "All kprobe override targets must be on the error injection list.\n");
 		err = -EINVAL;
 		goto error;
 	}
@@ -2966,8 +2992,10 @@ error:
 	return err;
 }
 #else /* !CONFIG_FPROBE */
-int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
+int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *prog,
+				 struct bpf_verifier_log *log)
 {
+	bpf_log(log, "This kernel does not support fprobe.\n");
 	return -EOPNOTSUPP;
 }
 static u64 bpf_kprobe_multi_cookie(struct bpf_run_ctx *ctx)
