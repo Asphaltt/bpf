@@ -43,6 +43,7 @@
 #include <linux/mman.h>
 #include <linux/compat.h>
 #include <linux/bpf.h>
+#include <linux/bpf_verifier.h>
 #include <linux/filter.h>
 #include <linux/namei.h>
 #include <linux/parser.h>
@@ -6633,7 +6634,8 @@ static int perf_copy_attr(struct perf_event_attr __user *uattr,
 			  struct perf_event_attr *attr);
 static int __perf_event_set_bpf_prog(struct perf_event *event,
 				     struct bpf_prog *prog,
-				     u64 bpf_cookie);
+				     u64 bpf_cookie,
+				     struct bpf_verifier_log *log);
 
 static long _perf_ioctl(struct perf_event *event, unsigned int cmd, unsigned long arg)
 {
@@ -6699,7 +6701,7 @@ static long _perf_ioctl(struct perf_event *event, unsigned int cmd, unsigned lon
 		if (IS_ERR(prog))
 			return PTR_ERR(prog);
 
-		err = __perf_event_set_bpf_prog(event, prog, 0);
+		err = __perf_event_set_bpf_prog(event, prog, 0, NULL);
 		if (err) {
 			bpf_prog_put(prog);
 			return err;
@@ -10830,7 +10832,8 @@ out:
 
 static inline int perf_event_set_bpf_handler(struct perf_event *event,
 					     struct bpf_prog *prog,
-					     u64 bpf_cookie)
+					     u64 bpf_cookie,
+					     struct bpf_verifier_log *log)
 {
 	if (event->overflow_handler_context)
 		/* hw breakpoint or kernel counter */
@@ -10839,8 +10842,10 @@ static inline int perf_event_set_bpf_handler(struct perf_event *event,
 	if (event->prog)
 		return -EEXIST;
 
-	if (prog->type != BPF_PROG_TYPE_PERF_EVENT)
+	if (prog->type != BPF_PROG_TYPE_PERF_EVENT) {
+		bpf_log(log, "Prog type must be BPF_PROG_TYPE_PERF_EVENT.\n");
 		return -EINVAL;
+	}
 
 	if (event->attr.precise_ip &&
 	    prog->call_get_stack &&
@@ -10884,7 +10889,8 @@ static inline int bpf_overflow_handler(struct perf_event *event,
 
 static inline int perf_event_set_bpf_handler(struct perf_event *event,
 					     struct bpf_prog *prog,
-					     u64 bpf_cookie)
+					     u64 bpf_cookie,
+					     struct bpf_verifier_log *log)
 {
 	return -EOPNOTSUPP;
 }
@@ -11837,7 +11843,8 @@ static inline bool perf_event_is_tracing(struct perf_event *event)
 
 static int __perf_event_set_bpf_prog(struct perf_event *event,
 				     struct bpf_prog *prog,
-				     u64 bpf_cookie)
+				     u64 bpf_cookie,
+				     struct bpf_verifier_log *log)
 {
 	bool is_kprobe, is_uprobe, is_tracepoint, is_syscall_tp;
 
@@ -11845,7 +11852,7 @@ static int __perf_event_set_bpf_prog(struct perf_event *event,
 		return -ENODEV;
 
 	if (!perf_event_is_tracing(event))
-		return perf_event_set_bpf_handler(event, prog, bpf_cookie);
+		return perf_event_set_bpf_handler(event, prog, bpf_cookie, log);
 
 	is_kprobe = event->tp_event->flags & TRACE_EVENT_FL_KPROBE;
 	is_uprobe = event->tp_event->flags & TRACE_EVENT_FL_UPROBE;
@@ -11855,15 +11862,22 @@ static int __perf_event_set_bpf_prog(struct perf_event *event,
 		/* bpf programs can only be attached to u/kprobe or tracepoint */
 		return -EINVAL;
 
-	if (((is_kprobe || is_uprobe) && prog->type != BPF_PROG_TYPE_KPROBE) ||
-	    (is_tracepoint && prog->type != BPF_PROG_TYPE_TRACEPOINT) ||
-	    (is_syscall_tp && prog->type != BPF_PROG_TYPE_TRACEPOINT))
+	if ((is_kprobe || is_uprobe) && prog->type != BPF_PROG_TYPE_KPROBE) {
+		bpf_log(log, "Only kprobe program can attach to uprobe/kprobe.\n");
 		return -EINVAL;
+	}
+
+	if ((is_tracepoint && prog->type != BPF_PROG_TYPE_TRACEPOINT) ||
+	    (is_syscall_tp && prog->type != BPF_PROG_TYPE_TRACEPOINT)) {
+		bpf_log(log, "Only tracepoint program can attach to tracepoint.\n");
+		return -EINVAL;
+	}
 
 	if (prog->type == BPF_PROG_TYPE_KPROBE) {
-		/* only uprobe programs are allowed to be sleepable */
-		if (prog->sleepable && !is_uprobe)
+		if (prog->sleepable && !is_uprobe) {
+			bpf_log(log, "Only uprobe programs are allowed to be sleepable.\n");
 			return -EINVAL;
+		}
 
 		/* only standard kprobe/uprobe programs are allowed to attach */
 		if (prog->expected_attach_type == BPF_TRACE_KPROBE_MULTI ||
@@ -11874,41 +11888,45 @@ static int __perf_event_set_bpf_prog(struct perf_event *event,
 	}
 
 	if (prog->type == BPF_PROG_TYPE_TRACEPOINT && prog->sleepable) {
-		/*
-		 * Sleepable tracepoint programs can only attach to faultable
-		 * tracepoints. Currently only syscall tracepoints are faultable.
-		 */
-		if (!is_syscall_tp)
+		if (!is_syscall_tp) {
+			bpf_log(log, "Sleepable tracepoint programs can only attach to faultable tracepoints. "
+				"Currently only syscall tracepoints are faultable.\n");
 			return -EINVAL;
+		}
 	}
 
-	/* Kprobe override only works for kprobes, not uprobes. */
-	if (prog->kprobe_override && !is_kprobe)
+	if (prog->kprobe_override && !is_kprobe) {
+		bpf_log(log, "Kprobe override only works for kprobes, not uprobes.\n");
 		return -EINVAL;
+	}
 
-	/* Writing to context allowed only for uprobes. */
-	if (prog->aux->kprobe_write_ctx && !is_uprobe)
+	if (prog->aux->kprobe_write_ctx && !is_uprobe) {
+		bpf_log(log, "Writing to context is only allowed for uprobes.\n");
 		return -EINVAL;
+	}
 
 	if (is_tracepoint || is_syscall_tp) {
 		int off = trace_event_get_offsets(event->tp_event);
 
-		if (prog->aux->max_ctx_offset > off)
+		if (prog->aux->max_ctx_offset > off) {
+			bpf_log(log, "Cannot access more ctx than the target tracepoint.\n");
 			return -EACCES;
+		}
 	}
 
-	return perf_event_attach_bpf_prog(event, prog, bpf_cookie);
+	return perf_event_attach_bpf_prog(event, prog, bpf_cookie, log);
 }
 
 int perf_event_set_bpf_prog(struct perf_event *event,
 			    struct bpf_prog *prog,
-			    u64 bpf_cookie)
+			    u64 bpf_cookie,
+			    struct bpf_verifier_log *log)
 {
 	struct perf_event_context *ctx;
 	int ret;
 
 	ctx = perf_event_ctx_lock(event);
-	ret = __perf_event_set_bpf_prog(event, prog, bpf_cookie);
+	ret = __perf_event_set_bpf_prog(event, prog, bpf_cookie, log);
 	perf_event_ctx_unlock(event, ctx);
 
 	return ret;
@@ -11938,14 +11956,16 @@ static void perf_event_free_filter(struct perf_event *event)
 
 static int __perf_event_set_bpf_prog(struct perf_event *event,
 				     struct bpf_prog *prog,
-				     u64 bpf_cookie)
+				     u64 bpf_cookie,
+				     struct bpf_verifier_log *log)
 {
 	return -ENOENT;
 }
 
 int perf_event_set_bpf_prog(struct perf_event *event,
 			    struct bpf_prog *prog,
-			    u64 bpf_cookie)
+			    u64 bpf_cookie,
+			    struct bpf_verifier_log *log)
 {
 	return -ENOENT;
 }

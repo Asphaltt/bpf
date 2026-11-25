@@ -1969,20 +1969,20 @@ static DEFINE_MUTEX(bpf_event_mutex);
 
 int perf_event_attach_bpf_prog(struct perf_event *event,
 			       struct bpf_prog *prog,
-			       u64 bpf_cookie)
+			       u64 bpf_cookie,
+			       struct bpf_verifier_log *log)
 {
 	struct bpf_prog_array *old_array;
 	struct bpf_prog_array *new_array;
 	int ret = -EEXIST;
 
-	/*
-	 * Kprobe override only works if they are on the function entry,
-	 * and only if they are on the opt-in list.
-	 */
 	if (prog->kprobe_override &&
 	    (!trace_kprobe_on_func_entry(event->tp_event) ||
-	     !trace_kprobe_error_injectable(event->tp_event)))
+	     !trace_kprobe_error_injectable(event->tp_event))) {
+		bpf_log(log, "Kprobe override only works if they are on the function entry, "
+			"and only if they are on the opt-in list.\n");
 		return -EINVAL;
+	}
 
 	mutex_lock(&bpf_event_mutex);
 
@@ -1992,6 +1992,7 @@ int perf_event_attach_bpf_prog(struct perf_event *event,
 	old_array = bpf_event_rcu_dereference(event->tp_event->prog_array);
 	if (old_array &&
 	    bpf_prog_array_length(old_array) >= BPF_TRACE_MAX_PROGS) {
+		bpf_log(log, "Too many programs (limit %d).\n", BPF_TRACE_MAX_PROGS);
 		ret = -E2BIG;
 		goto unlock;
 	}

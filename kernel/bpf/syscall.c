@@ -4337,7 +4337,8 @@ static const struct bpf_link_ops bpf_perf_link_lops = {
 	.show_fdinfo = bpf_perf_link_show_fdinfo,
 };
 
-static int bpf_perf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
+static int bpf_perf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog,
+				struct bpf_verifier_log *log)
 {
 	struct bpf_link_primer link_primer;
 	struct bpf_perf_link *link;
@@ -4345,12 +4346,16 @@ static int bpf_perf_link_attach(const union bpf_attr *attr, struct bpf_prog *pro
 	struct file *perf_file;
 	int err;
 
-	if (attr->link_create.flags)
+	if (attr->link_create.flags) {
+		bpf_log(log, "flags must be zero.\n");
 		return -EINVAL;
+	}
 
 	perf_file = perf_event_get(attr->link_create.target_fd);
-	if (IS_ERR(perf_file))
+	if (IS_ERR(perf_file)) {
+		bpf_log(log, "Invalid target_fd.\n");
 		return PTR_ERR(perf_file);
+	}
 
 	link = kzalloc_obj(*link, GFP_USER);
 	if (!link) {
@@ -4368,7 +4373,7 @@ static int bpf_perf_link_attach(const union bpf_attr *attr, struct bpf_prog *pro
 	}
 
 	event = perf_file->private_data;
-	err = perf_event_set_bpf_prog(event, prog, attr->link_create.perf_event.bpf_cookie);
+	err = perf_event_set_bpf_prog(event, prog, attr->link_create.perf_event.bpf_cookie, log);
 	if (err) {
 		bpf_link_cleanup(&link_primer);
 		goto out_put_file;
@@ -4383,8 +4388,10 @@ out_put_file:
 	return err;
 }
 #else
-static int bpf_perf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
+static int bpf_perf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog,
+				struct bpf_verifier_log *log)
 {
+	bpf_log(log, "This kernel does not support perf events.\n");
 	return -EOPNOTSUPP;
 }
 #endif /* CONFIG_PERF_EVENTS */
@@ -6011,11 +6018,11 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr, struct bpf_common_a
 #endif
 	case BPF_PROG_TYPE_PERF_EVENT:
 	case BPF_PROG_TYPE_TRACEPOINT:
-		ret = bpf_perf_link_attach(attr, prog);
+		ret = bpf_perf_link_attach(attr, prog, log);
 		break;
 	case BPF_PROG_TYPE_KPROBE:
 		if (attr->link_create.attach_type == BPF_PERF_EVENT)
-			ret = bpf_perf_link_attach(attr, prog);
+			ret = bpf_perf_link_attach(attr, prog, log);
 		else if (attr->link_create.attach_type == BPF_TRACE_KPROBE_MULTI ||
 			 attr->link_create.attach_type == BPF_TRACE_KPROBE_SESSION)
 			ret = bpf_kprobe_multi_link_attach(attr, prog);
